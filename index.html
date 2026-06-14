@@ -83,6 +83,41 @@
             background-color: #00e5ff;
         }
         
+        .select-container {
+            display: flex;
+            align-items: center;
+            background-color: var(--surface-colour);
+            border: 1px solid var(--border-colour);
+            border-radius: 8px;
+            padding: 0 1.5rem;
+            color: var(--text-main);
+            gap: 10px;
+        }
+
+        .select-container label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .select-container select {
+            background-color: transparent;
+            color: var(--text-main);
+            border: none;
+            outline: none;
+            padding: 1rem 0.5rem 1rem 0;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .select-container select option {
+            background-color: #12121a;
+            color: var(--text-main);
+        }
+
         button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
@@ -274,6 +309,13 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
             Select Folder to Process
         </button>
+        <div class="select-container">
+            <label for="notation-select">Key Notation</label>
+            <select id="notation-select">
+                <option value="camelot" selected>Camelot Wheel (8A)</option>
+                <option value="standard">Standard Keys (A Minor)</option>
+            </select>
+        </div>
         <button id="export-m3u8-btn" disabled>
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
             Export M3U8 Playlist

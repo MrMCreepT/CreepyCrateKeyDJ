@@ -13,6 +13,7 @@ const tracksTable = document.getElementById('tracks-table');
 const progressContainer = document.getElementById('progress-container');
 const progressBar = document.getElementById('progress-bar');
 const progressText = document.getElementById('progress-text');
+const notationSelect = document.getElementById('notation-select');
 
 // Player Elements
 const playerDeck = document.getElementById('player-deck');
@@ -74,6 +75,10 @@ function analyseInWorker(channelData, sampleRate) {
         workerCallbacks[taskId] = resolve;
         dspWorker.postMessage({ taskId, channelData, sampleRate });
     });
+}
+
+function formatKey(camelotCode, keyText, format) {
+    return format === 'camelot' ? camelotCode : keyText;
 }
 
 function getCompatibleKeys(camelotCode) {
@@ -147,7 +152,8 @@ resultsBody.addEventListener('click', (e) => {
         
         playerTrackName.textContent = row.querySelector('.new-name').textContent;
         playerBpm.textContent = `${row.getAttribute('data-bpm')} BPM`;
-        playerKey.textContent = selectedKey;
+        const format = notationSelect.value;
+        playerKey.textContent = formatKey(selectedKey, row.getAttribute('data-key-text'), format);
         playerGenre.textContent = row.getAttribute('data-genre') || "Unknown";
         playerDeck.classList.add('visible');
 
@@ -252,7 +258,9 @@ async function processBatchFile(fileHandle, outDirHandle) {
 
         if (!result.success) throw new Error(result.error);
 
-        const newFilename = `${result.camelotCode} - ${file.name}`;
+        const format = notationSelect.value;
+        const chosenKey = formatKey(result.camelotCode, result.keyText, format);
+        const newFilename = `${chosenKey} - ${file.name}`;
 
         // Save a copy of the original file under the new renamed filename (preserving 100% of original tags, cue points, and artwork)
         const newFileHandle = await outDirHandle.getFileHandle(newFilename, { create: true });
@@ -267,12 +275,14 @@ async function processBatchFile(fileHandle, outDirHandle) {
             newName: newFilename,
             bpm: result.bpm,
             key: result.camelotCode,
+            keyText: result.keyText,
             genre: genre
         });
 
         const badgeColour = result.camelotCode !== "Unknown" ? `var(--cam-${result.camelotCode.toLowerCase()})` : "var(--border-colour)";
 
         tr.setAttribute('data-key', result.camelotCode);
+        tr.setAttribute('data-key-text', result.keyText);
         tr.setAttribute('data-bpm', result.bpm);
         tr.setAttribute('data-genre', genre);
         tr.classList.add('ready');
@@ -282,7 +292,7 @@ async function processBatchFile(fileHandle, outDirHandle) {
         document.querySelector(`#${rowId} .genre-value`).textContent = genre;
         
         const badge = document.querySelector(`#${rowId} .badge`);
-        badge.textContent = result.camelotCode;
+        badge.textContent = chosenKey;
         badge.style.backgroundColor = badgeColour;
         badge.style.color = '#000';
 
@@ -382,12 +392,14 @@ function parseGenreFromBuffer(arrayBuffer) {
 exportCsvBtn.addEventListener('click', () => {
     if (exportData.length === 0) return;
     
+    const format = notationSelect.value;
     let csvContent = "Original Name,New Filename,BPM,Key,Genre\n";
     exportData.forEach(track => {
         const ogName = `"${track.originalName.replace(/"/g, '""')}"`;
         const newName = `"${track.newName.replace(/"/g, '""')}"`;
+        const keyVal = formatKey(track.key, track.keyText, format);
         const genreVal = `"${(track.genre || "Unknown").replace(/"/g, '""')}"`;
-        csvContent += `${ogName},${newName},${track.bpm},${track.key},${genreVal}\n`;
+        csvContent += `${ogName},${newName},${track.bpm},${keyVal},${genreVal}\n`;
     });
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
