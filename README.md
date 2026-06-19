@@ -1,6 +1,6 @@
 # CreepyKey PWA 🎧
 
-CreepyKey is a studio-grade, serverless **Progressive Web App (PWA)** designed specifically for DJs, music producers, and selectors. It allows you to batch-analyse local folders of MP3 files entirely within your web browser to detect BPM and Musical Key, outputting compatible **Camelot Wheel** values.
+CreepyKey is a studio-grade, serverless **Progressive Web App (PWA)** designed specifically for DJs, music producers, and selectors. It allows you to batch-analyse local folders of MP3 files entirely within your web browser to detect BPM and Musical Key, outputting compatible keys in either **Camelot Wheel** or **Standard Key** formats.
 
 Because it runs 100% client-side, your files never leave your computer—guaranteeing **100% privacy, zero server costs, and offline capability**.
 
@@ -9,8 +9,16 @@ Because it runs 100% client-side, your files never leave your computer—guarant
 ## ✨ Key Features
 
 *   📂 **Recursive Directory Processing**: Deep-scans selected folders using the *File System Access API*, bypassing the output folder to prevent loops.
+*   ⚡ **Dual-Layer Skip Optimization**:
+    *   **Destination Check**: Instantly skips processing if the target file already exists in the `Processed_Tracks` directory.
+    *   **Metadata Tag Bypass**: Scans the source file's ID3v2 headers for existing `TKEY` (Key) and `TBPM` (BPM) tags. If found, it bypasses the slow audio decoding and worker analysis steps entirely, resolving and copying the file in under 1 millisecond.
 *   🧠 **Off-Main-Thread DSP**: Mathematical calculations (peak-detection for BPM and selective DFT chromagram correlation for Key) run inside a background Web Worker to keep the UI smooth and responsive.
 *   🛡️ **In-Place Binary ID3 Preservation**: Modifies MP3 buffers directly to inject compatible Camelot Key (`TKEY`) and BPM (`TBPM`) tags. Unlike typical libraries, it **preserves 100% of your existing tags** (Artwork, Title, Artist, Album, Ratings, and DJ cue points/beatgrids from Rekordbox, Serato, or Traktor).
+*   ⚙️ **Flexible Batch Action Panel**:
+    *   **Rename Filename**: Prepends the key to the output file name (e.g. `8A - Track.mp3`).
+    *   **Prepend Key to Track Title**: Modifies the internal title tag (e.g. `8A - Track Title`).
+    *   **Write Key & BPM Tags**: Injects `TKEY` and `TBPM` tags directly.
+    *   **Fast Byte Copy**: If no tagging options are checked, performs a pure binary copy to ensure 100% tag and cue point preservation.
 *   🏷️ **Native Genre Extraction**: Automatically parses and decodes `TCON` (Genre) tags natively from the file binary, displaying them in the UI table and exporting them in CSV setlists.
 *   🚥 **Harmonic Traffic Light System**: Selecting a processed track highlights compatible mixing partners (perfect matches, $\pm 1$ hour shift, or relative major/minor) while dimming incompatible ones.
 *   🌊 **Interactive Waveform Deck**: Immediate preview playback with dynamic waveform renderings powered by `wavesurfer.js`.

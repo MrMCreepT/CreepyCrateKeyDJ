@@ -250,16 +250,36 @@ async function processBatchFile(fileHandle, outDirHandle) {
         const file = await fileHandle.getFile();
         const arrayBuffer = await file.arrayBuffer();
         
-        // Natively parse Genre from ID3v2 tag
-        const genre = parseGenreFromBuffer(arrayBuffer);
+        // Parse existing ID3 tags in one pass
+        const parsedTags = parseID3TagsFromBuffer(arrayBuffer);
+        const genre = parsedTags.genre;
         
-        const audioBufferCopy = arrayBuffer.slice(0); 
-        const decodedAudio = await audioContext.decodeAudioData(audioBufferCopy);
-
-        const channelData = decodedAudio.getChannelData(0);
-        const result = await analyseInWorker(channelData, decodedAudio.sampleRate);
-
-        if (!result.success) throw new Error(result.error);
+        // Check if there is already a valid key in the ID3 tag to skip DSP analysis
+        const resolved = resolveKey(parsedTags.key);
+        const resolvedBpm = parsedTags.bpm ? Math.round(parseFloat(parsedTags.bpm)) : 'Unknown';
+        
+        let result = null;
+        if (resolved) {
+            result = {
+                success: true,
+                camelotCode: resolved.camelotCode,
+                keyText: resolved.keyText,
+                bpm: resolvedBpm
+            };
+        } else {
+            // No valid key found, decode audio and analyze
+            const audioBufferCopy = arrayBuffer.slice(0); 
+            const decodedAudio = await audioContext.decodeAudioData(audioBufferCopy);
+            const channelData = decodedAudio.getChannelData(0);
+            const dspResult = await analyseInWorker(channelData, decodedAudio.sampleRate);
+            if (!dspResult.success) throw new Error(dspResult.error);
+            result = {
+                success: true,
+                camelotCode: dspResult.camelotCode,
+                keyText: dspResult.keyText,
+                bpm: dspResult.bpm
+            };
+        }
 
         const format = notationSelect.value;
         const chosenKey = formatKey(result.camelotCode, result.keyText, format);
@@ -267,22 +287,40 @@ async function processBatchFile(fileHandle, outDirHandle) {
         // Determine saved filename based on the Rename Filename option
         const savedFilename = optFilename.checked ? `${chosenKey} - ${file.name}` : file.name;
 
-        // Perform custom binary ID3v2 tag updates if options are selected
-        let outputBuffer = arrayBuffer;
-        if (optTitle.checked || optTags.checked) {
-            outputBuffer = updateID3Tags(arrayBuffer, result.camelotCode, result.bpm, {
-                prependTitle: optTitle.checked,
-                writeTags: optTags.checked
-            }, file.name);
+        // Check if the destination file already exists in Processed_Tracks folder
+        let fileExists = false;
+        let existingFileHandle = null;
+        try {
+            existingFileHandle = await outDirHandle.getFileHandle(savedFilename);
+            fileExists = true;
+        } catch (e) {
+            // File does not exist
         }
 
-        const savedFile = new File([outputBuffer], savedFilename, { type: file.type });
+        let outputBuffer = arrayBuffer;
+        let savedFile = null;
 
-        // Save the processed file under the decided filename
-        const newFileHandle = await outDirHandle.getFileHandle(savedFilename, { create: true });
-        const writable = await newFileHandle.createWritable();
-        await writable.write(outputBuffer);
-        await writable.close();
+        if (fileExists) {
+            // If output file already exists, read the existing one directly to avoid rewriting
+            const existingFile = await existingFileHandle.getFile();
+            savedFile = existingFile;
+        } else {
+            // Perform custom binary ID3v2 tag updates if options are selected
+            if (optTitle.checked || optTags.checked) {
+                outputBuffer = updateID3Tags(arrayBuffer, result.camelotCode, result.bpm, {
+                    prependTitle: optTitle.checked,
+                    writeTags: optTags.checked
+                }, file.name);
+            }
+
+            savedFile = new File([outputBuffer], savedFilename, { type: file.type });
+
+            // Save the processed file under the decided filename
+            const newFileHandle = await outDirHandle.getFileHandle(savedFilename, { create: true });
+            const writable = await newFileHandle.createWritable();
+            await writable.write(outputBuffer);
+            await writable.close();
+        }
 
         fileRegistry[rowId] = savedFile;
 
@@ -313,7 +351,7 @@ async function processBatchFile(fileHandle, outDirHandle) {
         badge.style.color = '#000';
 
         const status = document.querySelector(`#${rowId} .status`);
-        status.textContent = 'Saved';
+        status.textContent = fileExists ? 'Skipped (Exists)' : (resolved ? 'Loaded (Tag)' : 'Saved');
         status.className = 'status complete';
 
     } catch (error) {
@@ -324,11 +362,76 @@ async function processBatchFile(fileHandle, outDirHandle) {
     }
 }
 
-// Custom native ID3v2 parser to extract TCON (Genre)
-function parseGenreFromBuffer(arrayBuffer) {
+const camelotToStandard = {
+    "8B": "C Major",  "5A": "C Minor", "3B": "C# Major", "12A": "C# Minor",
+    "10B": "D Major", "7A": "D Minor", "5B": "D# Major", "2A": "D# Minor",
+    "12B": "E Major", "9A": "E Minor", "7B": "F Major",  "4A": "F Minor",
+    "2B": "F# Major", "11A": "F# Minor", "9B": "G Major",  "6A": "G Minor",
+    "4B": "G# Major", "1A": "G# Minor", "11B": "A Major", "8A": "A Minor",
+    "6B": "A# Major", "3A": "A# Minor", "1B": "B Major",  "10A": "B Minor"
+};
+
+const standardToCamelot = {};
+for (const [cam, std] of Object.entries(camelotToStandard)) {
+    standardToCamelot[std] = cam;
+}
+
+function resolveKey(keyString) {
+    if (!keyString) return null;
+    let clean = keyString.trim().replace(/\0+$/, '');
+    if (!clean) return null;
+    
+    // Split by slash, space, or hyphen to handle complex or dual keys (e.g. 8A/12A, 8A - A minor)
+    clean = clean.split(/[/\s-]/)[0].trim();
+    
+    // Camelot format check
+    const camelotMatch = clean.match(/^(\d{1,2})([ABab])$/);
+    if (camelotMatch) {
+        const num = camelotMatch[1];
+        const letter = camelotMatch[2].toUpperCase();
+        const code = num + letter;
+        if (camelotToStandard[code]) {
+            return {
+                camelotCode: code,
+                keyText: camelotToStandard[code]
+            };
+        }
+    }
+    
+    // Standard notation lookup mapping
+    const stdLookup = {
+        "c": "C Major", "cm": "C Minor", "cmin": "C Minor", "cminor": "C Minor",
+        "c#": "C# Major", "c#m": "C# Minor", "c#min": "C# Minor", "c#minor": "C# Minor", "db": "C# Major", "dbm": "C# Minor",
+        "d": "D Major", "dm": "D Minor", "dmin": "D Minor", "dminor": "D Minor",
+        "d#": "D# Major", "d#m": "D# Minor", "d#min": "D# Minor", "d#minor": "D# Minor", "eb": "D# Major", "ebm": "D# Minor",
+        "e": "E Major", "em": "E Minor", "emin": "E Minor", "eminor": "E Minor",
+        "f": "F Major", "fm": "F Minor", "fmin": "F Minor", "fminor": "F Minor",
+        "f#": "F# Major", "f#m": "F# Minor", "f#min": "F# Minor", "f#minor": "F# Minor", "gb": "F# Major", "gbm": "F# Minor",
+        "g": "G Major", "gm": "G Minor", "gmin": "G Minor", "gminor": "G Minor",
+        "g#": "G# Major", "g#m": "G# Minor", "g#min": "G# Minor", "g#minor": "G# Minor", "ab": "G# Major", "abm": "G# Minor",
+        "a": "A Major", "am": "A Minor", "amin": "A Minor", "aminor": "A Minor",
+        "a#": "A# Major", "a#m": "A# Minor", "a#min": "A# Minor", "a#minor": "A# Minor", "bb": "A# Major", "bbm": "A# Minor",
+        "b": "B Major", "bm": "B Minor", "bmin": "B Minor", "bminor": "B Minor"
+    };
+    
+    const lookupKey = clean.toLowerCase().replace(/\s+minor/g, 'm').replace(/\s+major/g, '').trim();
+    if (stdLookup[lookupKey]) {
+        const resolvedStd = stdLookup[lookupKey];
+        return {
+            camelotCode: standardToCamelot[resolvedStd],
+            keyText: resolvedStd
+        };
+    }
+    
+    return null;
+}
+
+// Custom native ID3v2 parser to extract TCON (Genre), TKEY (Key), TBPM (BPM), and TIT2 (Title)
+function parseID3TagsFromBuffer(arrayBuffer) {
+    const tags = { genre: "Unknown", key: null, bpm: null, title: null };
     const uint8 = new Uint8Array(arrayBuffer);
     if (uint8[0] !== 0x49 || uint8[1] !== 0x44 || uint8[2] !== 0x33) {
-        return "Unknown";
+        return tags;
     }
     
     const majorVersion = uint8[3];
@@ -363,42 +466,31 @@ function parseGenreFromBuffer(arrayBuffer) {
             break;
         }
         
+        if (frameSize <= 0) break;
         const totalFrameSize = 10 + frameSize;
         if (offset + totalFrameSize > endOfTags) break;
         
         if (frameId === 'TCON') {
-            const encoding = uint8[offset + 10];
-            const textBytes = uint8.subarray(offset + 11, offset + 10 + frameSize);
-            let genre = "";
-            
-            try {
-                if (encoding === 0) {
-                    genre = String.fromCharCode.apply(null, textBytes);
-                } else if (encoding === 1) {
-                    genre = new TextDecoder('utf-16').decode(textBytes);
-                } else if (encoding === 2) {
-                    genre = new TextDecoder('utf-16be').decode(textBytes);
-                } else if (encoding === 3) {
-                    genre = new TextDecoder('utf-8').decode(textBytes);
-                }
-            } catch (e) {
-                genre = "Unknown";
-            }
-            
-            genre = genre.replace(/\0+$/, '').trim();
-            const match = genre.match(/^\((\d+)\)$/);
+            let genreVal = decodeTextFrame(uint8, offset, frameSize);
+            const match = genreVal.match(/^\((\d+)\)$/);
             if (match) {
                 const id = parseInt(match[1], 10);
                 if (id >= 0 && id < genresList.length) {
-                    return genresList[id];
+                    genreVal = genresList[id];
                 }
             }
-            return genre || "Unknown";
+            tags.genre = genreVal || "Unknown";
+        } else if (frameId === 'TKEY') {
+            tags.key = decodeTextFrame(uint8, offset, frameSize);
+        } else if (frameId === 'TBPM') {
+            tags.bpm = decodeTextFrame(uint8, offset, frameSize);
+        } else if (frameId === 'TIT2') {
+            tags.title = decodeTextFrame(uint8, offset, frameSize);
         }
         
         offset += totalFrameSize;
     }
-    return "Unknown";
+    return tags;
 }
 
 // Custom native ID3v2 frame-preserving editor
