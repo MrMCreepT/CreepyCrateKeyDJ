@@ -14,6 +14,9 @@ const progressContainer = document.getElementById('progress-container');
 const progressBar = document.getElementById('progress-bar');
 const progressText = document.getElementById('progress-text');
 const notationSelect = document.getElementById('notation-select');
+const optFilename = document.getElementById('opt-filename');
+const optTitle = document.getElementById('opt-title');
+const optTags = document.getElementById('opt-tags');
 
 // Player Elements
 const playerDeck = document.getElementById('player-deck');
@@ -260,19 +263,32 @@ async function processBatchFile(fileHandle, outDirHandle) {
 
         const format = notationSelect.value;
         const chosenKey = formatKey(result.camelotCode, result.keyText, format);
-        const newFilename = `${chosenKey} - ${file.name}`;
+        
+        // Determine saved filename based on the Rename Filename option
+        const savedFilename = optFilename.checked ? `${chosenKey} - ${file.name}` : file.name;
 
-        // Save a copy of the original file under the new renamed filename (preserving 100% of original tags, cue points, and artwork)
-        const newFileHandle = await outDirHandle.getFileHandle(newFilename, { create: true });
+        // Perform custom binary ID3v2 tag updates if options are selected
+        let outputBuffer = arrayBuffer;
+        if (optTitle.checked || optTags.checked) {
+            outputBuffer = updateID3Tags(arrayBuffer, result.camelotCode, result.bpm, {
+                prependTitle: optTitle.checked,
+                writeTags: optTags.checked
+            }, file.name);
+        }
+
+        const savedFile = new File([outputBuffer], savedFilename, { type: file.type });
+
+        // Save the processed file under the decided filename
+        const newFileHandle = await outDirHandle.getFileHandle(savedFilename, { create: true });
         const writable = await newFileHandle.createWritable();
-        await writable.write(arrayBuffer);
+        await writable.write(outputBuffer);
         await writable.close();
 
-        fileRegistry[rowId] = file;
+        fileRegistry[rowId] = savedFile;
 
         exportData.push({
             originalName: file.name,
-            newName: newFilename,
+            newName: savedFilename,
             bpm: result.bpm,
             key: result.camelotCode,
             keyText: result.keyText,
@@ -287,7 +303,7 @@ async function processBatchFile(fileHandle, outDirHandle) {
         tr.setAttribute('data-genre', genre);
         tr.classList.add('ready');
 
-        document.querySelector(`#${rowId} .new-name`).textContent = newFilename;
+        document.querySelector(`#${rowId} .new-name`).textContent = savedFilename;
         document.querySelector(`#${rowId} .bpm-value`).textContent = result.bpm;
         document.querySelector(`#${rowId} .genre-value`).textContent = genre;
         
@@ -386,6 +402,245 @@ function parseGenreFromBuffer(arrayBuffer) {
 }
 
 // Custom native ID3v2 frame-preserving editor
+function decodeTextFrame(uint8, offset, frameSize) {
+    const encoding = uint8[offset + 10];
+    const textBytes = uint8.subarray(offset + 11, offset + 10 + frameSize);
+    let text = "";
+    try {
+        if (encoding === 0) {
+            text = String.fromCharCode.apply(null, textBytes);
+        } else if (encoding === 1) {
+            text = new TextDecoder('utf-16').decode(textBytes);
+        } else if (encoding === 2) {
+            text = new TextDecoder('utf-16be').decode(textBytes);
+        } else if (encoding === 3) {
+            text = new TextDecoder('utf-8').decode(textBytes);
+        }
+    } catch (e) {
+        text = "";
+    }
+    return text.replace(/\0+$/, '').trim();
+}
+
+function createTextFrame(id, text, majorVersion = 3) {
+    const textBytes = new TextEncoder().encode(text);
+    const frameSize = 1 + textBytes.length; // 1 byte encoding
+    const frameData = new Uint8Array(10 + frameSize);
+    
+    frameData[0] = id.charCodeAt(0);
+    frameData[1] = id.charCodeAt(1);
+    frameData[2] = id.charCodeAt(2);
+    frameData[3] = id.charCodeAt(3);
+    
+    if (majorVersion === 4) {
+        // Syncsafe integer for ID3v2.4
+        frameData[4] = (frameSize >> 21) & 0x7F;
+        frameData[5] = (frameSize >> 14) & 0x7F;
+        frameData[6] = (frameSize >> 7) & 0x7F;
+        frameData[7] = frameSize & 0x7F;
+    } else {
+        // Standard 32-bit big endian for ID3v2.3
+        frameData[4] = (frameSize >> 24) & 0xFF;
+        frameData[5] = (frameSize >> 16) & 0xFF;
+        frameData[6] = (frameSize >> 8) & 0xFF;
+        frameData[7] = frameSize & 0xFF;
+    }
+    
+    frameData[8] = 0;
+    frameData[9] = 0;
+    frameData[10] = 3; // UTF-8 encoding
+    frameData.set(textBytes, 11);
+    
+    return frameData;
+}
+
+function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename) {
+    const uint8 = new Uint8Array(arrayBuffer);
+    
+    // Check for ID3 header
+    if (uint8[0] !== 0x49 || uint8[1] !== 0x44 || uint8[2] !== 0x33) {
+        // Return original if no tags need to be written
+        if (!options.writeTags && !options.prependTitle) {
+            return arrayBuffer;
+        }
+        // Otherwise create new tag using fallback
+        return createMinimalID3Tag(arrayBuffer, camelotCode, bpm, options, fallbackFilename);
+    }
+    
+    const majorVersion = uint8[3];
+    const revision = uint8[4];
+    const flags = uint8[5];
+    const tagSize = ((uint8[6] & 0x7F) << 21) | 
+                    ((uint8[7] & 0x7F) << 14) | 
+                    ((uint8[8] & 0x7F) << 7) | 
+                    (uint8[9] & 0x7F);
+                    
+    let offset = 10;
+    if (flags & 0x40) {
+        const extHeaderSize = ((uint8[offset] & 0x7F) << 21) | 
+                              ((uint8[offset+1] & 0x7F) << 14) | 
+                              ((uint8[offset+2] & 0x7F) << 7) | 
+                              (uint8[offset+3] & 0x7F);
+        offset += 4 + extHeaderSize;
+    }
+    
+    const preservedFrames = [];
+    const newFrames = [];
+    const endOfTags = 10 + tagSize;
+    let foundTitle = false;
+    
+    while (offset + 10 <= endOfTags) {
+        const frameId = String.fromCharCode(uint8[offset], uint8[offset+1], uint8[offset+2], uint8[offset+3]);
+        if (uint8[offset] === 0) break; // Padding
+        
+        let frameSize = 0;
+        if (majorVersion === 3) {
+            frameSize = (uint8[offset+4] << 24) | (uint8[offset+5] << 16) | (uint8[offset+6] << 8) | uint8[offset+7];
+        } else if (majorVersion === 4) {
+            frameSize = ((uint8[offset+4] & 0x7F) << 21) | ((uint8[offset+5] & 0x7F) << 14) | ((uint8[offset+6] & 0x7F) << 7) | (uint8[offset+7] & 0x7F);
+        } else {
+            return arrayBuffer; // Unknown version, return unmodified
+        }
+        
+        if (frameSize <= 0) break;
+        
+        const totalFrameSize = 10 + frameSize;
+        if (offset + totalFrameSize > endOfTags) break;
+        
+        if (frameId === 'TKEY' || frameId === 'TBPM') {
+            if (options.writeTags) {
+                offset += totalFrameSize;
+                continue; // Skip so we can replace
+            }
+        }
+        
+        if (frameId === 'TIT2') {
+            foundTitle = true;
+            if (options.prependTitle) {
+                const originalTitle = decodeTextFrame(uint8, offset, frameSize);
+                // Prepend Key if not already prepended
+                const prefix = `${camelotCode} - `;
+                let newTitle = originalTitle;
+                if (!originalTitle.startsWith(prefix)) {
+                    newTitle = prefix + originalTitle;
+                }
+                newFrames.push(createTextFrame('TIT2', newTitle, majorVersion));
+                offset += totalFrameSize;
+                continue;
+            }
+        }
+        
+        preservedFrames.push(uint8.subarray(offset, offset + totalFrameSize));
+        offset += totalFrameSize;
+    }
+    
+    // Add new TKEY / TBPM if needed
+    if (options.writeTags) {
+        if (camelotCode && camelotCode !== 'Unknown') {
+            newFrames.push(createTextFrame('TKEY', camelotCode, majorVersion));
+        }
+        if (bpm && bpm !== 'Unknown') {
+            newFrames.push(createTextFrame('TBPM', bpm.toString(), majorVersion));
+        }
+    }
+    
+    // Add new TIT2 if not found and prependTitle is requested
+    if (options.prependTitle && !foundTitle) {
+        const cleanName = fallbackFilename.replace(/\.[^/.]+$/, "");
+        newFrames.push(createTextFrame('TIT2', `${camelotCode} - ${cleanName}`, majorVersion));
+    }
+    
+    let framesSizeSum = 0;
+    preservedFrames.forEach(f => framesSizeSum += f.length);
+    newFrames.forEach(f => framesSizeSum += f.length);
+    
+    const paddingSize = 1024;
+    const newTagSize = framesSizeSum + paddingSize;
+    
+    const audioDataOffset = 10 + tagSize;
+    const audioDataLength = uint8.length - audioDataOffset;
+    
+    const newFileBuffer = new Uint8Array(10 + newTagSize + audioDataLength);
+    
+    // Write Header
+    newFileBuffer[0] = 0x49; // I
+    newFileBuffer[1] = 0x44; // D
+    newFileBuffer[2] = 0x33; // 3
+    newFileBuffer[3] = majorVersion;
+    newFileBuffer[4] = revision;
+    newFileBuffer[5] = flags & ~0x40; // Clear extended header flag
+    
+    newFileBuffer[6] = (newTagSize >> 21) & 0x7F;
+    newFileBuffer[7] = (newTagSize >> 14) & 0x7F;
+    newFileBuffer[8] = (newTagSize >> 7) & 0x7F;
+    newFileBuffer[9] = newTagSize & 0x7F;
+    
+    let writeOffset = 10;
+    
+    preservedFrames.forEach(f => {
+        newFileBuffer.set(f, writeOffset);
+        writeOffset += f.length;
+    });
+    
+    newFrames.forEach(f => {
+        newFileBuffer.set(f, writeOffset);
+        writeOffset += f.length;
+    });
+    
+    for (let i = 0; i < paddingSize; i++) {
+        newFileBuffer[writeOffset + i] = 0;
+    }
+    writeOffset += paddingSize;
+    
+    newFileBuffer.set(uint8.subarray(audioDataOffset), writeOffset);
+    
+    return newFileBuffer.buffer;
+}
+
+function createMinimalID3Tag(arrayBuffer, camelotCode, bpm, options, fallbackFilename) {
+    // If no existing ID3 tags, create a fresh one from scratch
+    const newFrames = [];
+    if (options.prependTitle) {
+        const cleanName = fallbackFilename.replace(/\.[^/.]+$/, "");
+        newFrames.push(createTextFrame('TIT2', `${camelotCode} - ${cleanName}`, 3));
+    }
+    if (options.writeTags) {
+        if (camelotCode && camelotCode !== 'Unknown') {
+            newFrames.push(createTextFrame('TKEY', camelotCode, 3));
+        }
+        if (bpm && bpm !== 'Unknown') {
+            newFrames.push(createTextFrame('TBPM', bpm.toString(), 3));
+        }
+    }
+    
+    let framesSizeSum = 0;
+    newFrames.forEach(f => framesSizeSum += f.length);
+    
+    const paddingSize = 256;
+    const tagSize = framesSizeSum + paddingSize;
+    
+    const uint8 = new Uint8Array(arrayBuffer);
+    const newBuffer = new Uint8Array(10 + tagSize + uint8.length);
+    
+    newBuffer[0] = 0x49; newBuffer[1] = 0x44; newBuffer[2] = 0x33; // ID3
+    newBuffer[3] = 3; newBuffer[4] = 0; newBuffer[5] = 0; // version 2.3.0
+    
+    newBuffer[6] = (tagSize >> 21) & 0x7F;
+    newBuffer[7] = (tagSize >> 14) & 0x7F;
+    newBuffer[8] = (tagSize >> 7) & 0x7F;
+    newBuffer[9] = tagSize & 0x7F;
+    
+    let writeOffset = 10;
+    newFrames.forEach(f => {
+        newBuffer.set(f, writeOffset);
+        writeOffset += f.length;
+    });
+    
+    writeOffset += paddingSize; // zeros by default
+    newBuffer.set(uint8, writeOffset);
+    
+    return newBuffer.buffer;
+}
 
 
 // Exports

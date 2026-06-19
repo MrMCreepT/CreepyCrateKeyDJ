@@ -123,6 +123,41 @@
             cursor: not-allowed;
         }
 
+        .options-container {
+            display: flex;
+            gap: 25px;
+            margin-bottom: 1.5rem;
+            background-color: var(--surface-colour);
+            border: 1px solid var(--border-colour);
+            border-radius: 8px;
+            padding: 1rem 2rem;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            max-width: 1100px;
+            box-sizing: border-box;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+            color: var(--text-main);
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--accent-colour);
+            cursor: pointer;
+            margin: 0;
+        }
+
         #progress-container {
             width: 100%;
             max-width: 1100px;
@@ -324,6 +359,21 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
             Export CSV Setlist
         </button>
+    </div>
+
+    <div class="options-container">
+        <label class="checkbox-label">
+            <input type="checkbox" id="opt-filename" checked>
+            Rename Filename
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="opt-title">
+            Prepend Key to Track Title Tag
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="opt-tags">
+            Write Key & BPM Tags to ID3
+        </label>
     </div>
 
     <div id="progress-container">
