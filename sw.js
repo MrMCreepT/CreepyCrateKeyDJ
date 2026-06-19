@@ -1,4 +1,4 @@
-const CACHE_NAME = 'key-analyser-v6';
+const CACHE_NAME = 'key-analyser-v7';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',

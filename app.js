@@ -30,10 +30,24 @@ const playerGenre = document.getElementById('player-genre');
 
 // State Management
 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-const dspWorker = new Worker('worker.js');
+const poolSize = Math.min(navigator.hardwareConcurrency || 2, 4);
+const workers = [];
 const workerCallbacks = {};
+for (let i = 0; i < poolSize; i++) {
+    const worker = new Worker('worker.js');
+    worker.onmessage = (e) => {
+        const { taskId, bpm, camelotCode, success, error } = e.data;
+        if (workerCallbacks[taskId]) {
+            workerCallbacks[taskId]({ bpm, camelotCode, success, error });
+            delete workerCallbacks[taskId];
+        }
+    };
+    workers.push(worker);
+}
 const fileRegistry = {}; 
 let exportData = []; // Stores processed track metadata for export
+let currentObjectUrl = null;
+let isAnalyzing = false;
 
 let wavesurfer = null;
 document.addEventListener('DOMContentLoaded', () => {
@@ -62,21 +76,27 @@ document.addEventListener('DOMContentLoaded', () => {
     playPauseBtn.addEventListener('click', () => {
         wavesurfer.playPause();
     });
+
+    // Spacebar Play/Pause Hotkey
+    document.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') {
+            const active = document.activeElement;
+            if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA')) {
+                return;
+            }
+            if (wavesurfer && playerDeck.classList.contains('visible')) {
+                e.preventDefault();
+                wavesurfer.playPause();
+            }
+        }
+    });
 });
 
-dspWorker.onmessage = (e) => {
-    const { taskId, bpm, camelotCode, success, error } = e.data;
-    if (workerCallbacks[taskId]) {
-        workerCallbacks[taskId]({ bpm, camelotCode, success, error });
-        delete workerCallbacks[taskId];
-    }
-};
-
-function analyseInWorker(channelData, sampleRate) {
+function analyseInWorker(channelData, sampleRate, workerIndex) {
     return new Promise((resolve) => {
-        const taskId = `task-${Date.now()}-${Math.random()}`;
+        const taskId = `task-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
         workerCallbacks[taskId] = resolve;
-        dspWorker.postMessage({ taskId, channelData, sampleRate });
+        workers[workerIndex].postMessage({ taskId, channelData, sampleRate });
     });
 }
 
@@ -151,7 +171,11 @@ resultsBody.addEventListener('click', (e) => {
     const rowId = row.id;
     if (fileRegistry[rowId]) {
         const file = fileRegistry[rowId];
-        const objectUrl = URL.createObjectURL(file);
+        
+        if (currentObjectUrl) {
+            URL.revokeObjectURL(currentObjectUrl);
+        }
+        currentObjectUrl = URL.createObjectURL(file);
         
         playerTrackName.textContent = row.querySelector('.new-name').textContent;
         playerBpm.textContent = `${row.getAttribute('data-bpm')} BPM`;
@@ -160,7 +184,7 @@ resultsBody.addEventListener('click', (e) => {
         playerGenre.textContent = row.getAttribute('data-genre') || "Unknown";
         playerDeck.classList.add('visible');
 
-        wavesurfer.load(objectUrl);
+        wavesurfer.load(currentObjectUrl);
         wavesurfer.once('ready', () => {
             wavesurfer.play();
         });
@@ -170,7 +194,17 @@ resultsBody.addEventListener('click', (e) => {
 folderBtn.addEventListener('click', async () => {
     try {
         const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        const outDirHandle = await dirHandle.getDirectoryHandle('Processed_Tracks', { create: true });
+        await startProcessingDirectory(dirHandle);
+    } catch (err) {
+        console.error("Folder selection cancelled or failed:", err);
+        folderBtn.disabled = false;
+        folderBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg> Select Folder to Process`;
+    }
+});
+
+async function startProcessingDirectory(dirHandle) {
+    try {
+        isAnalyzing = true;
         
         resultsBody.innerHTML = ''; 
         tracksTable.classList.remove('has-selection');
@@ -194,17 +228,34 @@ folderBtn.addEventListener('click', async () => {
             folderBtn.disabled = false;
             folderBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg> Select Folder to Process`;
             progressText.textContent = "No MP3 files found in the selected folder.";
+            isAnalyzing = false;
             return;
         }
 
         let processedCount = 0;
         updateProgress(0, filesToProcess.length);
 
-        for (const entry of filesToProcess) {
-            await processBatchFile(entry, outDirHandle);
+        const outDirHandle = await dirHandle.getDirectoryHandle('Processed_Tracks', { create: true });
+        const queue = [...filesToProcess];
+        
+        const runNext = async (workerIndex) => {
+            if (queue.length === 0) return;
+            const entry = queue.shift();
+            try {
+                await processBatchFile(entry, outDirHandle, workerIndex);
+            } catch (err) {
+                console.error("Error processing file in queue:", err);
+            }
             processedCount++;
             updateProgress(processedCount, filesToProcess.length);
+            await runNext(workerIndex);
+        };
+
+        const promises = [];
+        for (let i = 0; i < Math.min(poolSize, filesToProcess.length); i++) {
+            promises.push(runNext(i));
         }
+        await Promise.all(promises);
 
         folderBtn.disabled = false;
         folderBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg> Select Folder to Process`;
@@ -216,11 +267,13 @@ folderBtn.addEventListener('click', async () => {
         }
 
     } catch (err) {
-        console.error("Folder selection cancelled or failed:", err);
+        console.error("Folder processing failed:", err);
         folderBtn.disabled = false;
         folderBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg> Select Folder to Process`;
+    } finally {
+        isAnalyzing = false;
     }
-});
+}
 
 function updateProgress(current, total) {
     const percentage = total === 0 ? 0 : (current / total) * 100;
@@ -228,8 +281,8 @@ function updateProgress(current, total) {
     progressText.textContent = `Analysing ${current} of ${total} files...`;
 }
 
-async function processBatchFile(fileHandle, outDirHandle) {
-    const rowId = `track-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
+    const rowId = `track-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
     const tr = document.createElement('tr');
     tr.id = rowId;
     tr.className = 'track-row';
@@ -271,7 +324,7 @@ async function processBatchFile(fileHandle, outDirHandle) {
             const audioBufferCopy = arrayBuffer.slice(0); 
             const decodedAudio = await audioContext.decodeAudioData(audioBufferCopy);
             const channelData = decodedAudio.getChannelData(0);
-            const dspResult = await analyseInWorker(channelData, decodedAudio.sampleRate);
+            const dspResult = await analyseInWorker(channelData, decodedAudio.sampleRate, workerIndex);
             if (!dspResult.success) throw new Error(dspResult.error);
             result = {
                 success: true,
@@ -767,6 +820,82 @@ function createMinimalID3Tag(arrayBuffer, camelotCode, bpm, options, fallbackFil
     return newBuffer.buffer;
 }
 
+
+// Tab Close Protection
+window.addEventListener('beforeunload', (e) => {
+    if (isAnalyzing) {
+        e.preventDefault();
+        e.returnValue = 'Batch analysis is currently in progress. Are you sure you want to leave and lose progress?';
+    }
+});
+
+// Drag and drop handlers
+window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (!folderBtn.disabled) {
+        document.body.classList.add('drag-over');
+    }
+});
+
+window.addEventListener('dragleave', () => {
+    document.body.classList.remove('drag-over');
+});
+
+window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    document.body.classList.remove('drag-over');
+    if (folderBtn.disabled) return;
+    
+    const items = e.dataTransfer.items;
+    if (items && items.length > 0) {
+        const item = items[0];
+        if (item.kind === 'file') {
+            if (typeof item.getAsFileSystemHandle === 'function') {
+                try {
+                    const handle = await item.getAsFileSystemHandle();
+                    if (handle.kind === 'directory') {
+                        // Request readwrite permission
+                        const opt = { mode: 'readwrite' };
+                        if (await handle.queryPermission(opt) === 'granted' || await handle.requestPermission(opt) === 'granted') {
+                            await startProcessingDirectory(handle);
+                        }
+                    } else {
+                        alert("Please drop a folder, not individual files.");
+                    }
+                } catch (err) {
+                    console.error("Error getting directory handle:", err);
+                }
+            } else {
+                alert("This browser does not support drag and drop directory handles. Please click 'Select Folder to Process' instead.");
+            }
+        }
+    }
+});
+
+// Inject Drag-over style dynamically
+const dragOverStyle = document.createElement('style');
+dragOverStyle.textContent = `
+    body.drag-over {
+        position: relative;
+    }
+    body.drag-over::after {
+        content: "Drop Folder to Process";
+        position: fixed;
+        top: 0; left: 0; width: 100%; height: 100%;
+        background-color: rgba(13, 13, 18, 0.95);
+        border: 4px dashed var(--accent-colour);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 2rem;
+        font-weight: 800;
+        color: var(--accent-colour);
+        z-index: 9999;
+        pointer-events: none;
+        box-sizing: border-box;
+    }
+`;
+document.head.appendChild(dragOverStyle);
 
 // Exports
 exportCsvBtn.addEventListener('click', () => {
