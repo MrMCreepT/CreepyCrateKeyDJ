@@ -369,17 +369,90 @@
             max-width: 100%;
         }
 
-        .wheel-container-wrapper {
-            flex: 0 0 320px;
+        .outline-btn {
+            background-color: transparent;
+            color: var(--accent-colour) !important;
+            border: 1px solid rgba(0, 229, 255, 0.3);
+        }
+        
+        .outline-btn:hover {
+            background-color: rgba(0, 229, 255, 0.1) !important;
+            color: var(--accent-colour) !important;
+        }
+
+        /* Key Wheel Drawer Styles */
+        .wheel-drawer-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(13, 13, 18, 0.75);
+            backdrop-filter: blur(8px);
+            z-index: 2000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+        
+        .wheel-drawer-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        
+        .wheel-drawer {
+            position: fixed;
+            top: 0;
+            right: -360px;
+            width: 360px;
+            height: 100%;
+            background-color: var(--surface-colour);
+            border-left: 1px solid var(--border-colour);
+            box-shadow: -5px 0 25px rgba(0, 0, 0, 0.5);
+            z-index: 2001;
+            padding: 2rem;
+            box-sizing: border-box;
             display: flex;
             flex-direction: column;
             align-items: center;
-            background-color: var(--surface-colour);
-            border: 1px solid var(--border-colour);
-            border-radius: 12px;
-            padding: 1.5rem;
-            box-sizing: border-box;
-            align-self: flex-start;
+            transition: right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        
+        .wheel-drawer-overlay.active .wheel-drawer {
+            right: 0;
+        }
+        
+        .wheel-drawer-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            margin-bottom: 2rem;
+        }
+        
+        .wheel-drawer-header h3 {
+            margin: 0;
+            font-size: 1.1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-main);
+            font-weight: 700;
+        }
+        
+        .wheel-close-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s ease;
+        }
+        
+        .wheel-close-btn:hover {
+            color: var(--accent-colour);
         }
 
         /* Sortable Columns */
@@ -430,7 +503,8 @@
             margin-bottom: 1.5rem;
             width: 100%;
             max-width: 1100px;
-            justify-content: flex-start;
+            justify-content: space-between;
+            align-items: center;
         }
 
         .tab-btn {
@@ -886,8 +960,14 @@
     </header>
 
     <div class="view-switch-container">
-        <button id="btn-view-crate" class="tab-btn active">Crate Library</button>
-        <button id="btn-view-setlist" class="tab-btn">Setlist Builder & DJ Mixer</button>
+        <div style="display: flex; gap: 10px;">
+            <button id="btn-view-crate" class="tab-btn active">Crate Library</button>
+            <button id="btn-view-setlist" class="tab-btn">Setlist Builder & DJ Mixer</button>
+        </div>
+        <button id="btn-toggle-wheel" class="tab-btn outline-btn" style="display: flex; align-items: center; gap: 6px;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 2v20M2 12h20M12 12l7.07-7.07M12 12L4.93 19.07M12 12L4.93 4.93M12 12l7.07 7.07"/></svg>
+            Harmonic Key Wheel
+        </button>
     </div>
 
     <!-- Crate View Panel -->
@@ -958,13 +1038,7 @@
                     </tbody>
                 </table>
             </div>
-            <div class="wheel-container-wrapper">
-                <h3 style="margin-top: 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-muted); text-align: center; font-weight: 700;">Harmonic Key Wheel</h3>
-                <div id="camelot-wheel-container" style="width: 270px; height: 270px; display: flex; align-items: center; justify-content: center;"></div>
-                <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 1rem; text-align: center; line-height: 1.45; font-weight: 500;">
-                    Click segments to toggle filter. Glowing neighbors represent harmonic matches.
-                </div>
-            </div>
+            <!-- Wheel container has been moved to the sliding drawer overlay at the bottom of the body -->
         </div>
     </div>
 
@@ -1167,6 +1241,22 @@
             </div>
         </div>
         <div id="waveform-container"></div>
+    </div>
+
+    <!-- Harmonic Key Wheel Drawer -->
+    <div id="wheel-drawer-overlay" class="wheel-drawer-overlay">
+        <div class="wheel-drawer">
+            <div class="wheel-drawer-header">
+                <h3>Harmonic Key Wheel</h3>
+                <button id="btn-close-wheel" class="wheel-close-btn" title="Close Key Wheel">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+            <div id="camelot-wheel-container" style="width: 280px; height: 280px; display: flex; align-items: center; justify-content: center;"></div>
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 1.5rem; text-align: center; line-height: 1.5; font-weight: 500;">
+                Click segments to toggle filter. Glowing neighbors represent harmonic matches.
+            </div>
+        </div>
     </div>
 
     <script src="app.js"></script>

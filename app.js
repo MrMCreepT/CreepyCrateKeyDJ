@@ -1511,6 +1511,27 @@ function locateBeatGrid(channelData, sampleRate, bpm) {
     return bestOffsetSamples / sampleRate;
 }
 
+// Toggle Key Wheel Drawer
+const btnToggleWheel = document.getElementById('btn-toggle-wheel');
+const btnCloseWheel = document.getElementById('btn-close-wheel');
+const wheelDrawerOverlay = document.getElementById('wheel-drawer-overlay');
+
+if (btnToggleWheel && btnCloseWheel && wheelDrawerOverlay) {
+    btnToggleWheel.addEventListener('click', () => {
+        wheelDrawerOverlay.classList.add('active');
+    });
+
+    btnCloseWheel.addEventListener('click', () => {
+        wheelDrawerOverlay.classList.remove('active');
+    });
+
+    wheelDrawerOverlay.addEventListener('click', (e) => {
+        if (e.target === wheelDrawerOverlay) {
+            wheelDrawerOverlay.classList.remove('active');
+        }
+    });
+}
+
 // 8. View switching tab listeners
 const btnViewCrate = document.getElementById('btn-view-crate');
 const btnViewSetlist = document.getElementById('btn-view-setlist');
