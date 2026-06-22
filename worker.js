@@ -13,14 +13,124 @@ self.onmessage = function(e) {
 };
 
 function detectBPM(channelData, sampleRate) {
+    // We analyze the first 60 seconds of the track (starting at 10s to skip silent intros)
+    const startSec = 10;
+    const durationSec = 60;
+    const startSample = Math.min(channelData.length, Math.floor(startSec * sampleRate));
+    const endSample = Math.min(channelData.length, Math.floor((startSec + durationSec) * sampleRate));
+    const analysisLength = endSample - startSample;
+    
+    if (analysisLength < sampleRate * 10) {
+        // Fallback to simpler method or analyze whatever we have
+        return detectBpmFallback(channelData, sampleRate);
+    }
+    
+    // 150 Hz Low-Pass Filter
+    const lpCutoff = 150;
+    const lpRc = 1 / (2 * Math.PI * lpCutoff);
+    const lpAlpha = 1 / (lpRc * sampleRate + 1);
+    
+    // 10 Hz Envelope Low-Pass Filter
+    const envCutoff = 10;
+    const envRc = 1 / (2 * Math.PI * envCutoff);
+    const envAlpha = 1 / (envRc * sampleRate + 1);
+    
+    let lpState = 0;
+    let envState = 0;
+    
+    // Downsample envelope to 1000 Hz
+    const targetDsRate = 1000;
+    const dsStep = Math.round(sampleRate / targetDsRate);
+    const dsSampleRate = sampleRate / dsStep; // Exact downsampled sample rate (~1000 Hz)
+    
+    const fluxLength = Math.floor(analysisLength / dsStep);
+    const flux = new Float32Array(fluxLength);
+    let prevEnv = 0;
+    
+    for (let i = 0; i < fluxLength; i++) {
+        const blockStart = startSample + i * dsStep;
+        const blockEnd = blockStart + dsStep;
+        for (let j = blockStart; j < blockEnd; j++) {
+            const x = channelData[j];
+            lpState = lpState + lpAlpha * (x - lpState);
+            const rectified = Math.abs(lpState);
+            envState = envState + envAlpha * (rectified - envState);
+        }
+        flux[i] = Math.max(0, envState - prevEnv);
+        prevEnv = envState;
+    }
+    
+    // Coarse Search (60 to 180 BPM, step 1) using 200 Hz downsampled data
+    const coarseDsFactor = 5;
+    const flux200 = new Float32Array(Math.floor(fluxLength / coarseDsFactor));
+    for (let i = 0; i < flux200.length; i++) {
+        flux200[i] = flux[i * coarseDsFactor];
+    }
+    const sampleRate200 = dsSampleRate / coarseDsFactor;
+    
+    function getAutocorr(data, lag) {
+        let sum = 0;
+        const len = data.length;
+        const start = Math.floor(len * 0.1);
+        const end = Math.floor(len * 0.9);
+        const lagInt = Math.floor(lag);
+        const lagFrac = lag - lagInt;
+        
+        if (lagFrac === 0) {
+            for (let t = start; t < end - lagInt; t++) {
+                sum += data[t] * data[t + lagInt];
+            }
+        } else {
+            const oneMinusFrac = 1 - lagFrac;
+            for (let t = start; t < end - lagInt - 1; t++) {
+                const interp = data[t + lagInt] * oneMinusFrac + data[t + lagInt + 1] * lagFrac;
+                sum += data[t] * interp;
+            }
+        }
+        return sum;
+    }
+    
+    let bestCoarseBpm = 120;
+    let maxCoarseScore = -1;
+    
+    for (let bpm = 60; bpm <= 180; bpm++) {
+        const lag = (60 / bpm) * sampleRate200;
+        const r1 = getAutocorr(flux200, lag);
+        const r2 = getAutocorr(flux200, lag * 2);
+        const score = r1 + 0.5 * r2;
+        
+        if (score > maxCoarseScore) {
+            maxCoarseScore = score;
+            bestCoarseBpm = bpm;
+        }
+    }
+    
+    // Fine Search (bestCoarseBpm - 2 to bestCoarseBpm + 2, step 0.1) using 1000 Hz data
+    let bestBpm = bestCoarseBpm;
+    let maxFineScore = -1;
+    
+    for (let bpm = bestCoarseBpm - 2; bpm <= bestCoarseBpm + 2; bpm += 0.1) {
+        const lag = (60 / bpm) * dsSampleRate;
+        const r1 = getAutocorr(flux, lag);
+        const r2 = getAutocorr(flux, lag * 2);
+        const score = r1 + 0.5 * r2;
+        
+        if (score > maxFineScore) {
+            maxFineScore = score;
+            bestBpm = bpm;
+        }
+    }
+    
+    return bestBpm > 0 ? parseFloat(bestBpm.toFixed(1)) : 'Unknown';
+}
+
+function detectBpmFallback(channelData, sampleRate) {
     let peaks = [];
     const threshold = 0.8; 
     let maxAmp = 0;
-    
     for (let i = 0; i < channelData.length; i++) {
         if (channelData[i] > maxAmp) maxAmp = channelData[i];
     }
-
     const peakThreshold = maxAmp * threshold;
     for (let i = 0; i < channelData.length; i++) {
         if (channelData[i] > peakThreshold) {
@@ -28,7 +138,6 @@ function detectBPM(channelData, sampleRate) {
             i += Math.floor(sampleRate / 4); 
         }
     }
-
     let intervals = {};
     for (let i = 1; i < peaks.length; i++) {
         const interval = peaks[i] - peaks[i - 1];
@@ -37,7 +146,6 @@ function detectBPM(channelData, sampleRate) {
             intervals[tempo] = (intervals[tempo] || 0) + 1;
         }
     }
-
     let maxCount = 0;
     let detectedBpm = 0;
     for (const [tempo, count] of Object.entries(intervals)) {

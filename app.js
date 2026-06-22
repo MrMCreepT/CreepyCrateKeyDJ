@@ -1469,45 +1469,99 @@ function locateBeatGrid(channelData, sampleRate, bpm) {
     if (!bpm || bpm === 'Unknown' || isNaN(bpm)) return 0;
     const beatIntervalSamples = (60 / bpm) * sampleRate;
     
-    // Calculate short-time energy envelope for the first 15 seconds
-    const frameSize = 1024;
-    const stepSize = 256;
-    const energy = [];
-    const searchLimit = Math.min(channelData.length, sampleRate * 15);
+    // Process the first 45 seconds of the audio
+    const searchSeconds = 45;
+    const searchLimit = Math.min(channelData.length, sampleRate * searchSeconds);
     
-    for (let i = 0; i < searchLimit; i += stepSize) {
-        let sum = 0;
-        const limit = Math.min(channelData.length, i + frameSize);
-        for (let j = i; j < limit; j++) {
-            sum += channelData[j] * channelData[j];
+    // 150 Hz Low-Pass Filter for isolating kicks
+    const lpCutoff = 150;
+    const lpRc = 1 / (2 * Math.PI * lpCutoff);
+    const lpAlpha = 1 / (lpRc * sampleRate + 1);
+    
+    // 15 Hz Low-Pass Filter for envelope smoothing
+    const envCutoff = 15;
+    const envRc = 1 / (2 * Math.PI * envCutoff);
+    const lpAlphaEnv = 1 / (envRc * sampleRate + 1);
+    
+    let lpState = 0;
+    let envState = 0;
+    
+    const stepSize = 64; // ~1.45ms resolution at 44.1kHz
+    const fluxLength = Math.floor(searchLimit / stepSize);
+    const flux = new Float32Array(fluxLength);
+    
+    let prevEnvValue = 0;
+    
+    for (let i = 0; i < fluxLength; i++) {
+        const blockStart = i * stepSize;
+        const blockEnd = blockStart + stepSize;
+        for (let j = blockStart; j < blockEnd; j++) {
+            const x = channelData[j];
+            // 150 Hz LPF
+            lpState = lpState + lpAlpha * (x - lpState);
+            // Rectify and 15 Hz Envelope LPF
+            const rectified = Math.abs(lpState);
+            envState = envState + lpAlphaEnv * (rectified - envState);
         }
-        energy.push(sum);
+        
+        // Compute temporal flux
+        const currentEnvValue = envState;
+        flux[i] = Math.max(0, currentEnvValue - prevEnvValue);
+        prevEnvValue = currentEnvValue;
     }
     
-    // Find the best phase (offset) between 0 and beatIntervalSamples
-    let bestOffsetSamples = 0;
-    let maxEnergySum = 0;
+    // Find peak flux to identify active beat level
+    let maxFlux = 0;
+    for (let i = 0; i < fluxLength; i++) {
+        if (flux[i] > maxFlux) maxFlux = flux[i];
+    }
     
-    const numCandidates = 60;
+    // Skip silent/ambient intro by locating the first block exceeding 15% of maxFlux
+    let startBlock = 0;
+    for (let i = 0; i < fluxLength; i++) {
+        if (flux[i] > 0.15 * maxFlux) {
+            startBlock = i;
+            break;
+        }
+    }
+    
+    // Phase search setup
+    const beatIntervalBlocks = beatIntervalSamples / stepSize;
+    let bestOffsetBlocks = 0;
+    let maxScore = -1;
+    
+    const numCandidates = 500;
+    const numBeatsToSum = 32;
+    
+    // Interpolated lookup for precise candidate scoring
+    function getInterpolatedFlux(index) {
+        if (index < 0 || index >= fluxLength - 1) return 0;
+        const base = Math.floor(index);
+        const frac = index - base;
+        return flux[base] * (1 - frac) + flux[base + 1] * frac;
+    }
+    
     for (let c = 0; c < numCandidates; c++) {
-        const offsetSamples = (c / numCandidates) * beatIntervalSamples;
-        let sum = 0;
+        const offsetBlocks = (c / numCandidates) * beatIntervalBlocks;
+        let score = 0;
         
-        // Sum energy at grid points (e.g. first 12 beats)
-        for (let t = 0; t < 12; t++) {
-            const targetSample = offsetSamples + t * beatIntervalSamples;
-            const energyIdx = Math.floor(targetSample / stepSize);
-            if (energyIdx < energy.length) {
-                sum += energy[energyIdx];
+        // Find the first beat index starting at or after the detected startBlock
+        const startK = Math.ceil((startBlock - offsetBlocks) / beatIntervalBlocks);
+        
+        for (let k = 0; k < numBeatsToSum; k++) {
+            const blockIdx = offsetBlocks + (startK + k) * beatIntervalBlocks;
+            if (blockIdx < fluxLength) {
+                score += getInterpolatedFlux(blockIdx);
             }
         }
         
-        if (sum > maxEnergySum) {
-            maxEnergySum = sum;
-            bestOffsetSamples = offsetSamples;
+        if (score > maxScore) {
+            maxScore = score;
+            bestOffsetBlocks = offsetBlocks;
         }
     }
     
+    const bestOffsetSamples = bestOffsetBlocks * stepSize;
     return bestOffsetSamples / sampleRate;
 }
 
@@ -2331,12 +2385,18 @@ function syncDeckTo(targetDeck) {
         
         const timeA = wavesurferA.getCurrentTime();
         const intervalA = 60 / currentBpmA;
-        const currentBeatIndexA = (timeA - trackOffsetA) / intervalA;
+        const phaseA = ((timeA - trackOffsetA) / intervalA) % 1;
+        const normalizedPhaseA = phaseA < 0 ? phaseA + 1 : phaseA;
         
-        const intervalB_pitched = 60 / (trackBpmB * targetRate);
-        const targetTimeB = (currentBeatIndexA * intervalB_pitched) + trackOffsetB;
+        const timeB = wavesurferB.getCurrentTime();
+        const intervalB_pitched = 60 / currentBpmA;
         
-        wavesurferB.setTime(targetTimeB);
+        const k = Math.round((timeB - trackOffsetB) / intervalB_pitched - normalizedPhaseA);
+        const targetTimeB = trackOffsetB + (k + normalizedPhaseA) * intervalB_pitched;
+        
+        if (targetTimeB >= 0 && targetTimeB <= wavesurferB.getDuration()) {
+            wavesurferB.setTime(targetTimeB);
+        }
     } else {
         if (trackBpmA <= 0 || trackBpmB <= 0) return;
         
@@ -2351,12 +2411,18 @@ function syncDeckTo(targetDeck) {
         
         const timeB = wavesurferB.getCurrentTime();
         const intervalB = 60 / currentBpmB;
-        const currentBeatIndexB = (timeB - trackOffsetB) / intervalB;
+        const phaseB = ((timeB - trackOffsetB) / intervalB) % 1;
+        const normalizedPhaseB = phaseB < 0 ? phaseB + 1 : phaseB;
         
-        const intervalA_pitched = 60 / (trackBpmA * targetRate);
-        const targetTimeA = (currentBeatIndexB * intervalA_pitched) + trackOffsetA;
+        const timeA = wavesurferA.getCurrentTime();
+        const intervalA_pitched = 60 / currentBpmB;
         
-        wavesurferA.setTime(targetTimeA);
+        const k = Math.round((timeA - trackOffsetA) / intervalA_pitched - normalizedPhaseB);
+        const targetTimeA = trackOffsetA + (k + normalizedPhaseB) * intervalA_pitched;
+        
+        if (targetTimeA >= 0 && targetTimeA <= wavesurferA.getDuration()) {
+            wavesurferA.setTime(targetTimeA);
+        }
     }
 }
 
