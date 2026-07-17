@@ -27,6 +27,28 @@
             --cam-4b: #F24EA4; --cam-5b: #C758E8; --cam-6b: #8F58E8; --cam-7b: #5C58E8;
         }
 
+        .tags-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            align-items: center;
+            max-width: 220px;
+        }
+
+        .tag-badge {
+            display: inline-flex;
+            align-items: center;
+            background: rgba(0, 229, 255, 0.08);
+            color: var(--accent-colour);
+            border: 1px solid rgba(0, 229, 255, 0.25);
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 0.70rem;
+            font-weight: 600;
+            white-space: nowrap;
+            line-height: 1.2;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: var(--bg-colour);
@@ -1030,6 +1052,7 @@
                             <th class="sortable" data-col="key">Key <span class="sort-icon"></span></th>
                             <th class="sortable" data-col="energy">Energy <span class="sort-icon"></span></th>
                             <th class="sortable" data-col="genre">Genre <span class="sort-icon"></span></th>
+                            <th class="sortable" data-col="tags">Performance Tags <span class="sort-icon"></span></th>
                             <th class="sortable" data-col="status">Status <span class="sort-icon"></span></th>
                             <th>Setlist</th>
                         </tr>

@@ -36,9 +36,9 @@ const workerCallbacks = {};
 for (let i = 0; i < poolSize; i++) {
     const worker = new Worker('worker.js');
     worker.onmessage = (e) => {
-        const { taskId, bpm, camelotCode, success, error } = e.data;
+        const { taskId, bpm, camelotCode, keyText, correlationScore, energyLevel, tags, grouping, comments, success, error } = e.data;
         if (workerCallbacks[taskId]) {
-            workerCallbacks[taskId]({ bpm, camelotCode, success, error });
+            workerCallbacks[taskId]({ bpm, camelotCode, keyText, correlationScore, energyLevel, tags, grouping, comments, success, error });
             delete workerCallbacks[taskId];
         }
     };
@@ -315,6 +315,7 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         </td>
         <td class="energy-value">-</td>
         <td class="genre-value">-</td>
+        <td class="tags-value">-</td>
         <td class="status loading">Analysing...</td>
         <td class="action-cell">-</td>
     `;
@@ -324,137 +325,32 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         const file = await fileHandle.getFile();
         const arrayBuffer = await file.arrayBuffer();
         
-        // 1. Scan output directory for any existing processed version of this track
-        let existingFileHandle = null;
-        const cleanFile = stripKeyPrefix(file.name);
-        try {
-            for await (const entry of outDirHandle.values()) {
-                if (entry.kind === 'file') {
-                    const cleanEntry = stripKeyPrefix(entry.name);
-                    if (cleanEntry === cleanFile) {
-                        existingFileHandle = entry;
-                        break;
-                    }
-                }
-            }
-        } catch (e) {
-            console.error("Error pre-scanning for existing processed file:", e);
-        }
-
-        let result = null;
-        let energyLevel = '--';
-        let beatOffset = 0.0;
-        let genre = "Unknown";
-        let fileExists = false;
-        let existingFile = null;
-
-        // If existing processed file is found, try loading metadata from it to skip analysis
-        if (existingFileHandle) {
-            try {
-                existingFile = await existingFileHandle.getFile();
-                const existingBuffer = await existingFile.arrayBuffer();
-                const existingTags = parseID3TagsFromBuffer(existingBuffer);
-                genre = existingTags.genre || "Unknown";
-
-                // Try to resolve key from TKEY
-                let resolved = resolveKey(existingTags.key);
-                
-                // If not in TKEY, try parsing it from the prepended title or the filename
-                if (!resolved) {
-                    const titleMatch = existingTags.title ? existingTags.title.match(/^(\d{1,2}[ABab]|[A-G]#?b?(?:\s*(?:Major|Minor|maj|min|m|M)))(?:\s*-\s*(\d{1,2}))?/i) : null;
-                    if (titleMatch) {
-                        resolved = resolveKey(titleMatch[1]);
-                        if (titleMatch[2]) {
-                            energyLevel = titleMatch[2];
-                        }
-                    }
-                }
-                
-                // Try parsing energy from the filename if we haven't found it yet
-                if (energyLevel === '--') {
-                    const fileMatch = existingFileHandle.name.match(/^(\d{1,2}[ABab]|[A-G]#?b?(?:\s*(?:Major|Minor|maj|min|m|M)))(?:\s*-\s*(\d{1,2}))?/i);
-                    if (fileMatch) {
-                        if (!resolved) {
-                            resolved = resolveKey(fileMatch[1]);
-                        }
-                        if (fileMatch[2]) {
-                            energyLevel = fileMatch[2];
-                        }
-                    }
-                }
-
-                if (resolved) {
-                    const resolvedBpm = existingTags.bpm ? Math.round(parseFloat(existingTags.bpm)) : 'Unknown';
-                    result = {
-                        success: true,
-                        camelotCode: resolved.camelotCode,
-                        keyText: resolved.keyText,
-                        bpm: resolvedBpm
-                    };
-                    
-                    if (energyLevel === '--' && resolvedBpm !== 'Unknown') {
-                        const bpmNum = parseInt(resolvedBpm, 10);
-                        if (bpmNum > 0) {
-                            energyLevel = Math.max(3, Math.min(9, Math.round((bpmNum - 80) / 10) + 3));
-                        }
-                    }
-                    fileExists = true;
-                }
-            } catch (err) {
-                console.warn("Could not load tags from existing processed file, falling back to analysis:", err);
-            }
-        }
-
-        let resolved = false;
-        // 2. If we couldn't load from existing file, analyze the input file
-        if (!result) {
-            // Parse existing ID3 tags in one pass from input file
-            const parsedTags = parseID3TagsFromBuffer(arrayBuffer);
-            genre = parsedTags.genre || "Unknown";
-            
-            // Check if there is already a valid key in the ID3 tag to skip DSP analysis
-            const tagResolved = resolveKey(parsedTags.key);
-            const resolvedBpm = parsedTags.bpm ? Math.round(parseFloat(parsedTags.bpm)) : 'Unknown';
-            
-            if (tagResolved) {
-                resolved = true;
-                result = {
-                    success: true,
-                    camelotCode: tagResolved.camelotCode,
-                    keyText: tagResolved.keyText,
-                    bpm: resolvedBpm
-                };
-                if (resolvedBpm !== 'Unknown') {
-                    const bpmNum = parseInt(resolvedBpm, 10);
-                    if (bpmNum > 0) {
-                        energyLevel = Math.max(3, Math.min(9, Math.round((bpmNum - 80) / 10) + 3));
-                    }
-                }
-            } else {
-                // No valid key found, decode audio and analyze
-                const audioBufferCopy = arrayBuffer.slice(0); 
-                const decodedAudio = await audioContext.decodeAudioData(audioBufferCopy);
-                const channelData = decodedAudio.getChannelData(0);
-                
-                // Calculate energy level (1-10)
-                energyLevel = calculateEnergyLevel(channelData);
-                
-                const dspResult = await analyseInWorker(channelData, decodedAudio.sampleRate, workerIndex);
-                if (!dspResult.success) throw new Error(dspResult.error);
-                result = {
-                    success: true,
-                    camelotCode: dspResult.camelotCode,
-                    keyText: dspResult.keyText,
-                    bpm: dspResult.bpm
-                };
-                
-                // Calculate beatgrid phase offset (seconds)
-                beatOffset = locateBeatGrid(channelData, decodedAudio.sampleRate, result.bpm);
-            }
-        } else {
-            // Mock resolved as true so if we skipped, status is correctly rendered
-            resolved = true;
-        }
+        // Parse existing ID3 tags from input file
+        const parsedTags = parseID3TagsFromBuffer(arrayBuffer);
+        const genre = parsedTags.genre || "Unknown";
+        
+        // Decode audio data for client-side DSP analysis
+        const audioBufferCopy = arrayBuffer.slice(0); 
+        const decodedAudio = await audioContext.decodeAudioData(audioBufferCopy);
+        const channelData = decodedAudio.getChannelData(0);
+        
+        // Run full Web Worker DSP analysis (Key, BPM, Energy, Mood, Vibes, Instruments, Rating)
+        const dspResult = await analyseInWorker(channelData, decodedAudio.sampleRate, workerIndex);
+        if (!dspResult.success) throw new Error(dspResult.error);
+        
+        const result = {
+            success: true,
+            camelotCode: dspResult.camelotCode,
+            keyText: dspResult.keyText,
+            bpm: dspResult.bpm
+        };
+        const energyLevel = dspResult.energyLevel || calculateEnergyLevel(channelData);
+        const performanceTags = dspResult.tags || [];
+        const groupingStr = dspResult.grouping || `Energy ${energyLevel}`;
+        const commentsStr = dspResult.comments || performanceTags.join(", ");
+        const ratingVal = dspResult.rating || 3;
+        const genreVal = dspResult.genre || (genre !== "Unknown" ? genre : "House");
+        const beatOffset = locateBeatGrid(channelData, decodedAudio.sampleRate, result.bpm);
 
         const format = notationSelect.value;
         const chosenKey = formatKey(result.camelotCode, result.keyText, format);
@@ -464,88 +360,41 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         const cleanFilename = stripKeyPrefix(file.name);
         const savedFilename = optFilename.checked ? `${chosenKey} - ${energyStr}${cleanFilename}` : file.name;
 
-        // Clean other duplicate processed files that have a different name
-        const duplicatesToDelete = [];
-        if (existingFileHandle && existingFileHandle.name !== savedFilename) {
-            duplicatesToDelete.push(existingFileHandle.name);
-            fileExists = false; // Name changed, so we need to rewrite
-        }
-        
-        // Scan for any other matching duplicates just in case
+        // Clean duplicate processed files in Processed_Tracks if filename changed
+        const cleanFile = stripKeyPrefix(file.name);
         try {
             for await (const entry of outDirHandle.values()) {
                 if (entry.kind === 'file') {
                     const cleanEntry = stripKeyPrefix(entry.name);
-                    if (cleanEntry === cleanFile && entry.name !== savedFilename && entry.name !== (existingFileHandle ? existingFileHandle.name : '')) {
-                        duplicatesToDelete.push(entry.name);
+                    if (cleanEntry === cleanFile && entry.name !== savedFilename) {
+                        await outDirHandle.removeEntry(entry.name);
                     }
                 }
             }
         } catch (e) {
-            console.error("Error scanning for duplicates:", e);
+            console.error("Error cleaning duplicate entries:", e);
         }
 
-        for (const dupName of duplicatesToDelete) {
-            try {
-                await outDirHandle.removeEntry(dupName);
-            } catch (err) {
-                console.warn(`Could not remove duplicate entry ${dupName}:`, err);
-            }
-        }
-
+        // Write ID3 tags (TKEY Camelot code, TBPM, TIT1 Grouping, COMM Comments, TCON Genre, POPM Rating, TIT2 Title)
         let outputBuffer = arrayBuffer;
-        let savedFile = null;
-
-        const energySuffix = (energyLevel !== '--') ? ` - ${energyLevel}` : '';
-        const titleKeyPrefix = `${chosenKey}${energySuffix}`;
-
-        if (fileExists && existingFile) {
-            // Check if existing file needs tag updates
-            const existingTags = parseID3TagsFromBuffer(await existingFile.arrayBuffer());
-            let needsUpdate = false;
-            if (optTitle.checked) {
-                const expectedPrefix = `${titleKeyPrefix} - `;
-                if (!existingTags.title || !existingTags.title.startsWith(expectedPrefix)) {
-                    needsUpdate = true;
-                }
-            }
-            if (optTags.checked) {
-                if (!existingTags.key) {
-                    needsUpdate = true;
-                }
-            }
-
-            if (!needsUpdate) {
-                savedFile = existingFile;
-            } else {
-                outputBuffer = updateID3Tags(await existingFile.arrayBuffer(), result.camelotCode, result.bpm, {
-                    prependTitle: optTitle.checked,
-                    titleKeyPrefix: titleKeyPrefix,
-                    writeTags: optTags.checked
-                }, file.name);
-
-                savedFile = new File([outputBuffer], savedFilename, { type: file.type });
-                const writable = await existingFileHandle.createWritable();
-                await writable.write(outputBuffer);
-                await writable.close();
-                fileExists = false; // So status shows 'Saved' rather than 'Skipped (Exists)'
-            }
-        } else {
-            // Write tags to input file buffer and save
-            if (optTitle.checked || optTags.checked) {
-                outputBuffer = updateID3Tags(arrayBuffer, result.camelotCode, result.bpm, {
-                    prependTitle: optTitle.checked,
-                    titleKeyPrefix: titleKeyPrefix,
-                    writeTags: optTags.checked
-                }, file.name);
-            }
-
-            savedFile = new File([outputBuffer], savedFilename, { type: file.type });
-            const newFileHandle = await outDirHandle.getFileHandle(savedFilename, { create: true });
-            const writable = await newFileHandle.createWritable();
-            await writable.write(outputBuffer);
-            await writable.close();
+        if (optTitle.checked || optTags.checked) {
+            const titleKeyPrefix = `${chosenKey}${energyLevel !== '--' ? ` - ${energyLevel}` : ''}`;
+            outputBuffer = updateID3Tags(arrayBuffer, result.camelotCode, result.bpm, {
+                prependTitle: optTitle.checked,
+                titleKeyPrefix: titleKeyPrefix,
+                writeTags: optTags.checked,
+                grouping: groupingStr,
+                comments: commentsStr,
+                genre: genreVal,
+                rating: ratingVal
+            }, file.name);
         }
+
+        const savedFile = new File([outputBuffer], savedFilename, { type: file.type });
+        const newFileHandle = await outDirHandle.getFileHandle(savedFilename, { create: true });
+        const writable = await newFileHandle.createWritable();
+        await writable.write(outputBuffer);
+        await writable.close();
 
         fileRegistry[rowId] = savedFile;
 
@@ -556,21 +405,25 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
             key: result.camelotCode,
             keyText: result.keyText,
             energy: energyLevel,
-            genre: genre,
+            genre: genreVal,
+            rating: ratingVal,
+            tags: performanceTags,
+            grouping: groupingStr,
+            comments: commentsStr,
             beatOffset: beatOffset,
             fileObject: savedFile,
             rowId: rowId
         });
 
         const trackIndex = exportData.length - 1;
-
         const badgeColour = result.camelotCode !== "Unknown" ? `var(--cam-${result.camelotCode.toLowerCase()})` : "var(--border-colour)";
 
         tr.setAttribute('data-key', result.camelotCode);
         tr.setAttribute('data-key-text', result.keyText);
         tr.setAttribute('data-bpm', result.bpm);
         tr.setAttribute('data-energy', energyLevel);
-        tr.setAttribute('data-genre', genre);
+        tr.setAttribute('data-genre', genreVal);
+        tr.setAttribute('data-tags', commentsStr || performanceTags.join(', '));
         tr.classList.add('ready');
 
         const newNameEl = document.querySelector(`#${rowId} .new-name`);
@@ -581,8 +434,13 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         document.querySelector(`#${rowId} .energy-value`).innerHTML = getEnergyBarHtml(energyLevel);
 
         const genreEl = document.querySelector(`#${rowId} .genre-value`);
-        genreEl.textContent = genre;
-        genreEl.setAttribute('title', genre);
+        genreEl.textContent = genreVal;
+        genreEl.setAttribute('title', genreVal);
+
+        const tagsEl = document.querySelector(`#${rowId} .tags-value`);
+        if (tagsEl) {
+            tagsEl.innerHTML = renderTagBadgesHtml(performanceTags);
+        }
         
         const badge = document.querySelector(`#${rowId} .badge`);
         badge.textContent = chosenKey;
@@ -590,7 +448,7 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         badge.style.color = '#000';
 
         const status = document.querySelector(`#${rowId} .status`);
-        status.textContent = fileExists ? 'Skipped (Exists)' : (resolved ? 'Loaded (Tag)' : 'Saved');
+        status.textContent = 'Saved';
         status.className = 'status complete';
 
         const actionCell = document.querySelector(`#${rowId} .action-cell`);
@@ -644,11 +502,8 @@ function resolveKey(keyString) {
     let clean = keyString.trim().replace(/\0+$/, '');
     if (!clean) return null;
     
-    // Split by slash, space, or hyphen to handle complex or dual keys (e.g. 8A/12A, 8A - A minor)
-    clean = clean.split(/[/\s-]/)[0].trim();
-    
-    // Camelot format check
-    const camelotMatch = clean.match(/^(\d{1,2})([ABab])$/);
+    // Check direct Camelot format anywhere in string (e.g. "8A", "11B", "8A - 7", "8A/12A")
+    const camelotMatch = clean.match(/\b([1-9]|1[0-2])([ABab])\b/);
     if (camelotMatch) {
         const num = camelotMatch[1];
         const letter = camelotMatch[2].toUpperCase();
@@ -661,25 +516,52 @@ function resolveKey(keyString) {
         }
     }
     
-    // Standard notation lookup mapping
+    // Normalize string for standard key lookup
+    let normalized = clean.toLowerCase()
+        .replace(/[-\/].*$/, '') // Remove secondary hyphen or slash parts
+        .replace(/\s+/g, ' ')
+        .trim();
+        
     const stdLookup = {
-        "c": "C Major", "cm": "C Minor", "cmin": "C Minor", "cminor": "C Minor",
-        "c#": "C# Major", "c#m": "C# Minor", "c#min": "C# Minor", "c#minor": "C# Minor", "db": "C# Major", "dbm": "C# Minor",
-        "d": "D Major", "dm": "D Minor", "dmin": "D Minor", "dminor": "D Minor",
-        "d#": "D# Major", "d#m": "D# Minor", "d#min": "D# Minor", "d#minor": "D# Minor", "eb": "D# Major", "ebm": "D# Minor",
-        "e": "E Major", "em": "E Minor", "emin": "E Minor", "eminor": "E Minor",
-        "f": "F Major", "fm": "F Minor", "fmin": "F Minor", "fminor": "F Minor",
-        "f#": "F# Major", "f#m": "F# Minor", "f#min": "F# Minor", "f#minor": "F# Minor", "gb": "F# Major", "gbm": "F# Minor",
-        "g": "G Major", "gm": "G Minor", "gmin": "G Minor", "gminor": "G Minor",
-        "g#": "G# Major", "g#m": "G# Minor", "g#min": "G# Minor", "g#minor": "G# Minor", "ab": "G# Major", "abm": "G# Minor",
-        "a": "A Major", "am": "A Minor", "amin": "A Minor", "aminor": "A Minor",
-        "a#": "A# Major", "a#m": "A# Minor", "a#min": "A# Minor", "a#minor": "A# Minor", "bb": "A# Major", "bbm": "A# Minor",
-        "b": "B Major", "bm": "B Minor", "bmin": "B Minor", "bminor": "B Minor"
+        "c": "C Major", "c maj": "C Major", "c major": "C Major",
+        "cm": "C Minor", "c min": "C Minor", "c minor": "C Minor", "cmin": "C Minor", "cminor": "C Minor",
+        
+        "c#": "C# Major", "c# maj": "C# Major", "c# major": "C# Major", "db": "C# Major", "db maj": "C# Major", "db major": "C# Major",
+        "c#m": "C# Minor", "c# min": "C# Minor", "c# minor": "C# Minor", "c#min": "C# Minor", "dbm": "C# Minor", "db min": "C# Minor", "db minor": "C# Minor",
+        
+        "d": "D Major", "d maj": "D Major", "d major": "D Major",
+        "dm": "D Minor", "d min": "D Minor", "d minor": "D Minor", "dmin": "D Minor", "dminor": "D Minor",
+        
+        "d#": "D# Major", "d# maj": "D# Major", "d# major": "D# Major", "eb": "D# Major", "eb maj": "D# Major", "eb major": "D# Major",
+        "d#m": "D# Minor", "d# min": "D# Minor", "d# minor": "D# Minor", "d#min": "D# Minor", "ebm": "D# Minor", "eb min": "D# Minor", "eb minor": "D# Minor",
+        
+        "e": "E Major", "e maj": "E Major", "e major": "E Major",
+        "em": "E Minor", "e min": "E Minor", "e minor": "E Minor", "emin": "E Minor", "eminor": "E Minor",
+        
+        "f": "F Major", "f maj": "F Major", "f major": "F Major",
+        "fm": "F Minor", "f min": "F Minor", "f minor": "F Minor", "fmin": "F Minor", "fminor": "F Minor",
+        
+        "f#": "F# Major", "f# maj": "F# Major", "f# major": "F# Major", "gb": "F# Major", "gb maj": "F# Major", "gb major": "F# Major",
+        "f#m": "F# Minor", "f# min": "F# Minor", "f# minor": "F# Minor", "f#min": "F# Minor", "gbm": "F# Minor", "gb min": "F# Minor", "gb minor": "F# Minor",
+        
+        "g": "G Major", "g maj": "G Major", "g major": "G Major",
+        "gm": "G Minor", "g min": "G Minor", "g minor": "G Minor", "gmin": "G Minor", "gminor": "G Minor",
+        
+        "g#": "G# Major", "g# maj": "G# Major", "g# major": "G# Major", "ab": "G# Major", "ab maj": "G# Major", "ab major": "G# Major",
+        "g#m": "G# Minor", "g# min": "G# Minor", "g# minor": "G# Minor", "g#min": "G# Minor", "abm": "G# Minor", "ab min": "G# Minor", "ab minor": "G# Minor",
+        
+        "a": "A Major", "a maj": "A Major", "a major": "A Major",
+        "am": "A Minor", "a min": "A Minor", "a minor": "A Minor", "amin": "A Minor", "aminor": "A Minor",
+        
+        "a#": "A# Major", "a# maj": "A# Major", "a# major": "A# Major", "bb": "A# Major", "bb maj": "A# Major", "bb major": "A# Major",
+        "a#m": "A# Minor", "a# min": "A# Minor", "a# minor": "A# Minor", "a#min": "A# Minor", "bbm": "A# Minor", "bb min": "A# Minor", "bb minor": "A# Minor",
+        
+        "b": "B Major", "b maj": "B Major", "b major": "B Major",
+        "bm": "B Minor", "b min": "B Minor", "b minor": "B Minor", "bmin": "B Minor", "bminor": "B Minor"
     };
     
-    const lookupKey = clean.toLowerCase().replace(/\s+minor/g, 'm').replace(/\s+major/g, '').trim();
-    if (stdLookup[lookupKey]) {
-        const resolvedStd = stdLookup[lookupKey];
+    if (stdLookup[normalized]) {
+        const resolvedStd = stdLookup[normalized];
         return {
             camelotCode: standardToCamelot[resolvedStd],
             keyText: resolvedStd
@@ -691,7 +573,7 @@ function resolveKey(keyString) {
 
 // Custom native ID3v2 parser to extract TCON (Genre), TKEY (Key), TBPM (BPM), and TIT2 (Title)
 function parseID3TagsFromBuffer(arrayBuffer) {
-    const tags = { genre: "Unknown", key: null, bpm: null, title: null };
+    const tags = { genre: "Unknown", key: null, bpm: null, title: null, grouping: null, comments: null };
     const uint8 = new Uint8Array(arrayBuffer);
     if (uint8[0] !== 0x49 || uint8[1] !== 0x44 || uint8[2] !== 0x33) {
         return tags;
@@ -749,6 +631,11 @@ function parseID3TagsFromBuffer(arrayBuffer) {
             tags.bpm = decodeTextFrame(uint8, offset, frameSize);
         } else if (frameId === 'TIT2') {
             tags.title = decodeTextFrame(uint8, offset, frameSize);
+        } else if (frameId === 'TIT1') {
+            tags.grouping = decodeTextFrame(uint8, offset, frameSize);
+        } else if (frameId === 'COMM') {
+            const commText = decodeTextFrame(uint8, offset + 4, frameSize > 4 ? frameSize - 4 : frameSize);
+            tags.comments = commText;
         }
         
         offset += totalFrameSize;
@@ -843,12 +730,101 @@ function createTextFrame(id, text, majorVersion = 3) {
     
     return frameData;
 }
+function createCommentFrame(text, majorVersion = 3) {
+    if (!text) return null;
+    const lang = [0x65, 0x6E, 0x67]; // "eng"
+    const isAscii = /^[\x00-\x7F]*$/.test(text);
+    const encoding = (majorVersion === 4) ? 3 : (isAscii ? 0 : 1);
+    
+    let textBytes;
+    if (encoding === 3) {
+        textBytes = new TextEncoder().encode(text);
+    } else if (encoding === 0) {
+        textBytes = new Uint8Array(text.length);
+        for (let i = 0; i < text.length; i++) textBytes[i] = text.charCodeAt(i);
+    } else {
+        textBytes = new Uint8Array(2 + text.length * 2);
+        textBytes[0] = 0xFF; textBytes[1] = 0xFE; // BOM LE
+        for (let i = 0; i < text.length; i++) {
+            const code = text.charCodeAt(i);
+            textBytes[2 + i * 2] = code & 0xFF;
+            textBytes[2 + i * 2 + 1] = (code >> 8) & 0xFF;
+        }
+    }
+    
+    const descTermLen = (encoding === 1) ? 2 : 1;
+    const payloadSize = 1 + 3 + descTermLen + textBytes.length;
+    const frameData = new Uint8Array(10 + payloadSize);
+    
+    frameData[0] = 0x43; frameData[1] = 0x4F; frameData[2] = 0x4D; frameData[3] = 0x4D; // COMM
+    
+    if (majorVersion === 4) {
+        frameData[4] = (payloadSize >> 21) & 0x7F;
+        frameData[5] = (payloadSize >> 14) & 0x7F;
+        frameData[6] = (payloadSize >> 7) & 0x7F;
+        frameData[7] = payloadSize & 0x7F;
+    } else {
+        frameData[4] = (payloadSize >> 24) & 0xFF;
+        frameData[5] = (payloadSize >> 16) & 0xFF;
+        frameData[6] = (payloadSize >> 8) & 0xFF;
+        frameData[7] = payloadSize & 0xFF;
+    }
+    
+    frameData[8] = 0; frameData[9] = 0;
+    frameData[10] = encoding;
+    frameData[11] = lang[0]; frameData[12] = lang[1]; frameData[13] = lang[2];
+    
+    let writeIdx = 14 + descTermLen;
+    frameData.set(textBytes, writeIdx);
+    
+    return frameData;
+}
+
+function renderTagBadgesHtml(tags) {
+    if (!tags || (Array.isArray(tags) && tags.length === 0)) return '<span style="color: var(--text-muted);">-</span>';
+    const tagList = Array.isArray(tags) ? tags : tags.split(',').map(t => t.trim()).filter(Boolean);
+    if (tagList.length === 0) return '<span style="color: var(--text-muted);">-</span>';
+    const badgesHtml = tagList.map(tag => `<span class="tag-badge" title="${tag}">${tag}</span>`).join('');
+    return `<div class="tags-container">${badgesHtml}</div>`;
+}
+
 function stripKeyPrefix(title) {
-    // Matches camelot key (e.g. 8A, 11B) or open key/traditional key (e.g. C# Minor, Bbm)
-    // optionally followed by a hyphen and energy rating (1-10)
-    // followed by a hyphen and space.
     const regex = /^(\d{1,2}[ABab]|[A-G]#?b?(?:\s*(?:Major|Minor|maj|min|m|M)))(?:\s*-\s*\d{1,2})?\s*-\s*/i;
     return title.replace(regex, '');
+}
+
+function createPopularimeterFrame(rating, majorVersion = 3) {
+    const emailBytes = new TextEncoder().encode("noemail@dj.com\0");
+    let ratingByte = 128; // default 3 stars
+    if (rating === 1) ratingByte = 32;
+    if (rating === 5) ratingByte = 255;
+    
+    const payloadSize = emailBytes.length + 1 + 4;
+    const frameData = new Uint8Array(10 + payloadSize);
+    
+    frameData[0] = 0x50; frameData[1] = 0x4F; frameData[2] = 0x50; frameData[3] = 0x4D; // POPM
+    
+    if (majorVersion === 4) {
+        frameData[4] = (payloadSize >> 21) & 0x7F;
+        frameData[5] = (payloadSize >> 14) & 0x7F;
+        frameData[6] = (payloadSize >> 7) & 0x7F;
+        frameData[7] = payloadSize & 0x7F;
+    } else {
+        frameData[4] = (payloadSize >> 24) & 0xFF;
+        frameData[5] = (payloadSize >> 16) & 0xFF;
+        frameData[6] = (payloadSize >> 8) & 0xFF;
+        frameData[7] = payloadSize & 0xFF;
+    }
+    
+    frameData[8] = 0; frameData[9] = 0;
+    let idx = 10;
+    frameData.set(emailBytes, idx);
+    idx += emailBytes.length;
+    frameData[idx] = ratingByte;
+    idx += 1;
+    frameData[idx] = 0; frameData[idx+1] = 0; frameData[idx+2] = 0; frameData[idx+3] = 0;
+    
+    return frameData;
 }
 
 function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename) {
@@ -856,11 +832,9 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
     
     // Check for ID3 header
     if (uint8[0] !== 0x49 || uint8[1] !== 0x44 || uint8[2] !== 0x33) {
-        // Return original if no tags need to be written
         if (!options.writeTags && !options.prependTitle) {
             return arrayBuffer;
         }
-        // Otherwise create new tag using fallback
         return createMinimalID3Tag(arrayBuffer, camelotCode, bpm, options, fallbackFilename);
     }
     
@@ -896,7 +870,7 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
         } else if (majorVersion === 4) {
             frameSize = ((uint8[offset+4] & 0x7F) << 21) | ((uint8[offset+5] & 0x7F) << 14) | ((uint8[offset+6] & 0x7F) << 7) | (uint8[offset+7] & 0x7F);
         } else {
-            return arrayBuffer; // Unknown version, return unmodified
+            return arrayBuffer;
         }
         
         if (frameSize <= 0) break;
@@ -904,10 +878,10 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
         const totalFrameSize = 10 + frameSize;
         if (offset + totalFrameSize > endOfTags) break;
         
-        if (frameId === 'TKEY' || frameId === 'TBPM') {
+        if (frameId === 'TKEY' || frameId === 'TBPM' || frameId === 'TIT1' || frameId === 'COMM' || frameId === 'POPM') {
             if (options.writeTags) {
                 offset += totalFrameSize;
-                continue; // Skip so we can replace
+                continue; // Skip so we can replace with new target values
             }
         }
         
@@ -916,8 +890,6 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
             if (options.prependTitle) {
                 const originalTitle = decodeTextFrame(uint8, offset, frameSize);
                 const prefix = `${options.titleKeyPrefix || camelotCode} - `;
-                
-                // Clean any existing key/energy prefix from the beginning
                 const cleanTitle = stripKeyPrefix(originalTitle);
                 const newTitle = prefix + cleanTitle;
                 
@@ -931,13 +903,23 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
         offset += totalFrameSize;
     }
     
-    // Add new TKEY / TBPM if needed
+    // Add new TKEY, TBPM, TIT1 (Grouping), COMM (Comments), POPM (Rating) if writeTags is enabled
     if (options.writeTags) {
         if (camelotCode && camelotCode !== 'Unknown') {
             newFrames.push(createTextFrame('TKEY', camelotCode, majorVersion));
         }
         if (bpm && bpm !== 'Unknown') {
             newFrames.push(createTextFrame('TBPM', bpm.toString(), majorVersion));
+        }
+        if (options.grouping) {
+            newFrames.push(createTextFrame('TIT1', options.grouping, majorVersion));
+        }
+        if (options.rating) {
+            newFrames.push(createPopularimeterFrame(options.rating, majorVersion));
+        }
+        if (options.comments) {
+            const commFrame = createCommentFrame(options.comments, majorVersion);
+            if (commFrame) newFrames.push(commFrame);
         }
     }
     
@@ -965,7 +947,7 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
     newFileBuffer[2] = 0x33; // 3
     newFileBuffer[3] = majorVersion;
     newFileBuffer[4] = revision;
-    newFileBuffer[5] = flags & ~0x40; // Clear extended header flag
+    newFileBuffer[5] = flags & ~0x40;
     
     newFileBuffer[6] = (newTagSize >> 21) & 0x7F;
     newFileBuffer[7] = (newTagSize >> 14) & 0x7F;
@@ -995,7 +977,6 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
 }
 
 function createMinimalID3Tag(arrayBuffer, camelotCode, bpm, options, fallbackFilename) {
-    // If no existing ID3 tags, create a fresh one from scratch
     const newFrames = [];
     if (options.prependTitle) {
         const cleanName = fallbackFilename.replace(/\.[^/.]+$/, "");
@@ -1007,6 +988,16 @@ function createMinimalID3Tag(arrayBuffer, camelotCode, bpm, options, fallbackFil
         }
         if (bpm && bpm !== 'Unknown') {
             newFrames.push(createTextFrame('TBPM', bpm.toString(), 3));
+        }
+        if (options.grouping) {
+            newFrames.push(createTextFrame('TIT1', options.grouping, 3));
+        }
+        if (options.rating) {
+            newFrames.push(createPopularimeterFrame(options.rating, 3));
+        }
+        if (options.comments) {
+            const commFrame = createCommentFrame(options.comments, 3);
+            if (commFrame) newFrames.push(commFrame);
         }
     }
     
@@ -1033,7 +1024,7 @@ function createMinimalID3Tag(arrayBuffer, camelotCode, bpm, options, fallbackFil
         writeOffset += f.length;
     });
     
-    writeOffset += paddingSize; // zeros by default
+    writeOffset += paddingSize;
     newBuffer.set(uint8, writeOffset);
     
     return newBuffer.buffer;
@@ -1121,14 +1112,16 @@ exportCsvBtn.addEventListener('click', () => {
     if (exportData.length === 0) return;
     
     const format = notationSelect.value;
-    let csvContent = "Original Name,New Filename,BPM,Key,Energy,Genre\n";
+    let csvContent = "Original Name,New Filename,BPM,Key,Energy,Genre,Performance Tags,Grouping\n";
     exportData.forEach(track => {
         const ogName = `"${track.originalName.replace(/"/g, '""')}"`;
         const newName = `"${track.newName.replace(/"/g, '""')}"`;
         const keyVal = formatKey(track.key, track.keyText, format);
         const energyVal = track.energy || '--';
         const genreVal = `"${(track.genre || "Unknown").replace(/"/g, '""')}"`;
-        csvContent += `${ogName},${newName},${track.bpm},${keyVal},${energyVal},${genreVal}\n`;
+        const tagsVal = `"${(track.comments || (track.tags ? track.tags.join(', ') : '')).replace(/"/g, '""')}"`;
+        const groupVal = `"${(track.grouping || `Energy ${energyVal}`).replace(/"/g, '""')}"`;
+        csvContent += `${ogName},${newName},${track.bpm},${keyVal},${energyVal},${genreVal},${tagsVal},${groupVal}\n`;
     });
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -1440,6 +1433,9 @@ function sortTable() {
             } else if (sortCol === 'genre') {
                 valA = (a.getAttribute('data-genre') || '').toLowerCase();
                 valB = (b.getAttribute('data-genre') || '').toLowerCase();
+            } else if (sortCol === 'tags') {
+                valA = (a.getAttribute('data-tags') || '').toLowerCase();
+                valB = (b.getAttribute('data-tags') || '').toLowerCase();
             } else if (sortCol === 'status') {
                 valA = a.querySelector('.status').textContent.toLowerCase();
                 valB = b.querySelector('.status').textContent.toLowerCase();
