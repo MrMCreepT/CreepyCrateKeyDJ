@@ -23,6 +23,7 @@ Because it runs 100% client-side, your files never leave your computer—guarant
     *   **Double Prevention**: Automatically deletes old processed versions of a song if settings or key notations change, keeping folders free of doubles.
 
 ### 🧠 Studio-Grade DSP Analysis
+*   🎹 **Rekordbox-Grade Harmonic Key Detection**: Analyzes multi-window audio snippets across 5 track segments (15%–85%) using industry-standard **Sha'ath (KeyFinder)** and **Temperley** electronic music profiles. Incorporates 60 Hz sub-bass fundamental capture, harmonic overtone attenuation (suppressing false 5th & major 3rd acoustic bleed), and relative major/minor bass-tonic disambiguation to match Rekordbox and Mixed In Key precision.
 *   🔥 **DJ Energy Level Estimation (1–10)**: Analyzes audio intensity (Root-Mean-Square level) of the audio buffer and maps it to a 1–10 Energy rating, complete with colorful dynamic flame indicators.
 *   ⚡ **Dual-Layer Skip Optimization**:
     *   **Destination Check**: Instantly skips processing if the target file already exists and matches the selected tagging options.
