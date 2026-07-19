@@ -334,7 +334,7 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         const decodedAudio = await audioContext.decodeAudioData(audioBufferCopy);
         const channelData = decodedAudio.getChannelData(0);
         
-        // Run full Web Worker DSP analysis (Key, BPM, Energy, Mood, Vibes, Instruments, Rating)
+        // Run full Web Worker DSP analysis (Key, BPM, Energy, Mood, Vibes, Instruments)
         const dspResult = await analyseInWorker(channelData, decodedAudio.sampleRate, workerIndex);
         if (!dspResult.success) throw new Error(dspResult.error);
         
@@ -348,7 +348,6 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         const performanceTags = dspResult.tags || [];
         const groupingStr = dspResult.grouping || `Energy ${energyLevel}`;
         const commentsStr = dspResult.comments || performanceTags.join(", ");
-        const ratingVal = dspResult.rating || 3;
         const genreVal = dspResult.genre || (genre !== "Unknown" ? genre : "House");
         const beatOffset = locateBeatGrid(channelData, decodedAudio.sampleRate, result.bpm);
 
@@ -375,7 +374,7 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
             console.error("Error cleaning duplicate entries:", e);
         }
 
-        // Write ID3 tags (TKEY Camelot code, TBPM, TIT1 Grouping, COMM Comments, TCON Genre, POPM Rating, TIT2 Title)
+        // Write ID3 tags (TKEY Camelot code, TBPM, TIT1 Grouping, COMM Comments, TCON Genre, TIT2 Title)
         let outputBuffer = arrayBuffer;
         if (optTitle.checked || optTags.checked) {
             const titleKeyPrefix = `${chosenKey}${energyLevel !== '--' ? ` - ${energyLevel}` : ''}`;
@@ -385,8 +384,7 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
                 writeTags: optTags.checked,
                 grouping: groupingStr,
                 comments: commentsStr,
-                genre: genreVal,
-                rating: ratingVal
+                genre: genreVal
             }, file.name);
         }
 
@@ -406,7 +404,6 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
             keyText: result.keyText,
             energy: energyLevel,
             genre: genreVal,
-            rating: ratingVal,
             tags: performanceTags,
             grouping: groupingStr,
             comments: commentsStr,
@@ -793,40 +790,6 @@ function stripKeyPrefix(title) {
     return title.replace(regex, '');
 }
 
-function createPopularimeterFrame(rating, majorVersion = 3) {
-    const emailBytes = new TextEncoder().encode("noemail@dj.com\0");
-    let ratingByte = 128; // default 3 stars
-    if (rating === 1) ratingByte = 32;
-    if (rating === 5) ratingByte = 255;
-    
-    const payloadSize = emailBytes.length + 1 + 4;
-    const frameData = new Uint8Array(10 + payloadSize);
-    
-    frameData[0] = 0x50; frameData[1] = 0x4F; frameData[2] = 0x50; frameData[3] = 0x4D; // POPM
-    
-    if (majorVersion === 4) {
-        frameData[4] = (payloadSize >> 21) & 0x7F;
-        frameData[5] = (payloadSize >> 14) & 0x7F;
-        frameData[6] = (payloadSize >> 7) & 0x7F;
-        frameData[7] = payloadSize & 0x7F;
-    } else {
-        frameData[4] = (payloadSize >> 24) & 0xFF;
-        frameData[5] = (payloadSize >> 16) & 0xFF;
-        frameData[6] = (payloadSize >> 8) & 0xFF;
-        frameData[7] = payloadSize & 0xFF;
-    }
-    
-    frameData[8] = 0; frameData[9] = 0;
-    let idx = 10;
-    frameData.set(emailBytes, idx);
-    idx += emailBytes.length;
-    frameData[idx] = ratingByte;
-    idx += 1;
-    frameData[idx] = 0; frameData[idx+1] = 0; frameData[idx+2] = 0; frameData[idx+3] = 0;
-    
-    return frameData;
-}
-
 function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename) {
     const uint8 = new Uint8Array(arrayBuffer);
     
@@ -878,7 +841,7 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
         const totalFrameSize = 10 + frameSize;
         if (offset + totalFrameSize > endOfTags) break;
         
-        if (frameId === 'TKEY' || frameId === 'TBPM' || frameId === 'TIT1' || frameId === 'COMM' || frameId === 'POPM') {
+        if (frameId === 'TKEY' || frameId === 'TBPM' || frameId === 'TIT1' || frameId === 'COMM') {
             if (options.writeTags) {
                 offset += totalFrameSize;
                 continue; // Skip so we can replace with new target values
@@ -903,7 +866,7 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
         offset += totalFrameSize;
     }
     
-    // Add new TKEY, TBPM, TIT1 (Grouping), COMM (Comments), POPM (Rating) if writeTags is enabled
+    // Add new TKEY, TBPM, TIT1 (Grouping), COMM (Comments) if writeTags is enabled
     if (options.writeTags) {
         if (camelotCode && camelotCode !== 'Unknown') {
             newFrames.push(createTextFrame('TKEY', camelotCode, majorVersion));
@@ -913,9 +876,6 @@ function updateID3Tags(arrayBuffer, camelotCode, bpm, options, fallbackFilename)
         }
         if (options.grouping) {
             newFrames.push(createTextFrame('TIT1', options.grouping, majorVersion));
-        }
-        if (options.rating) {
-            newFrames.push(createPopularimeterFrame(options.rating, majorVersion));
         }
         if (options.comments) {
             const commFrame = createCommentFrame(options.comments, majorVersion);
@@ -991,9 +951,6 @@ function createMinimalID3Tag(arrayBuffer, camelotCode, bpm, options, fallbackFil
         }
         if (options.grouping) {
             newFrames.push(createTextFrame('TIT1', options.grouping, 3));
-        }
-        if (options.rating) {
-            newFrames.push(createPopularimeterFrame(options.rating, 3));
         }
         if (options.comments) {
             const commFrame = createCommentFrame(options.comments, 3);

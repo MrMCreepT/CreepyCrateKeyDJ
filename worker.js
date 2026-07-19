@@ -1,4 +1,4 @@
-// CreepyCrate Worker: Universal Electronic Music DSP Engine for Key, BPM, & 5-Layer Tagging System
+// CreepyCrate Worker: Universal Electronic Music DSP Engine for Key, BPM, & Tagging System
 
 self.onmessage = function(e) {
     const { taskId, channelData, sampleRate } = e.data;
@@ -14,7 +14,6 @@ self.onmessage = function(e) {
             keyText, 
             camelotCode, 
             correlationScore,
-            rating: tagsResult.rating,
             genre: tagsResult.genre,
             mood: tagsResult.mood,
             energyLevel: tagsResult.energyLevel,
@@ -339,15 +338,7 @@ function extractUniversalElectronicTags(channelData, sampleRate, isMajor = false
     let energyLevel = Math.round(((rms - 0.04) / (0.28 - 0.04)) * 9) + 1;
     energyLevel = Math.max(1, Math.min(10, energyLevel));
     
-    // LAYER 1: Rating Stars (1, 3, 5 Stars)
-    let starRating = 3;
-    if (rmsDbFS > -7.5 && correlationScore > 0.70) {
-        starRating = 5;
-    } else if (rmsDbFS < -14.5 || correlationScore < 0.50) {
-        starRating = 1;
-    }
-    
-    // LAYER 2: Set Placement / Energy Transition Tag
+    // LAYER 1: Set Placement / Energy Transition Tag
     let setTimeEnergy = "Build";
     if (rmsDbFS < -13.5) setTimeEnergy = "Start";
     else if (rmsDbFS > -8.5 && crestFactor < 4.2) setTimeEnergy = "Peak";
@@ -582,7 +573,6 @@ function extractUniversalElectronicTags(channelData, sampleRate, isMajor = false
     const commentsString = finalTags.join(", ");
     
     return {
-        rating: starRating,
         genre: setTimeEnergy, // Set-time energy rating (e.g. Start, Build, Peak, Sustain)
         mood: mood,
         energyLevel,
