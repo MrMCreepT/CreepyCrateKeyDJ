@@ -6,6 +6,7 @@ if ('serviceWorker' in navigator) {
 
 // UI Elements
 const folderBtn = document.getElementById('folder-btn');
+const exportRekordboxBtn = document.getElementById('export-rekordbox-btn');
 const exportCsvBtn = document.getElementById('export-csv-btn');
 const exportM3u8Btn = document.getElementById('export-m3u8-btn');
 const resultsBody = document.getElementById('results-body');
@@ -221,6 +222,7 @@ async function startProcessingDirectory(dirHandle) {
         exportData = []; 
 
         folderBtn.disabled = true;
+        if (exportRekordboxBtn) exportRekordboxBtn.disabled = true;
         exportCsvBtn.disabled = true;
         exportM3u8Btn.disabled = true;
         
@@ -281,6 +283,7 @@ async function startProcessingDirectory(dirHandle) {
         progressText.textContent = "Batch Processing Complete!";
 
         if (exportData.length > 0) {
+            if (exportRekordboxBtn) exportRekordboxBtn.disabled = false;
             exportCsvBtn.disabled = false;
             exportM3u8Btn.disabled = false;
         }
@@ -404,10 +407,14 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
             keyText: result.keyText,
             energy: energyLevel,
             genre: genreVal,
+            rating: dspResult.rating || 3,
+            tuningHz: dspResult.tuningHz || 440.0,
+            tuningCents: dspResult.tuningCents || 0,
+            cues: dspResult.cues || [],
             tags: performanceTags,
             grouping: groupingStr,
             comments: commentsStr,
-            beatOffset: beatOffset,
+            beatOffset: dspResult.beatOffset || beatOffset,
             fileObject: savedFile,
             rowId: rowId
         });
@@ -427,7 +434,29 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         newNameEl.textContent = savedFilename;
         newNameEl.setAttribute('title', savedFilename);
 
-        document.querySelector(`#${rowId} .bpm-value`).textContent = result.bpm;
+        const bpmEl = document.querySelector(`#${rowId} .bpm-value`);
+        if (bpmEl) {
+            bpmEl.innerHTML = `
+                <div class="bpm-container">
+                    <span class="bpm-num">${result.bpm}</span>
+                    <div class="bpm-multiplier-btns">
+                        <button class="bpm-btn btn-bpm-double" title="Double BPM (x2)" data-row="${rowId}">2×</button>
+                        <button class="bpm-btn btn-bpm-half" title="Halve BPM (/2)" data-row="${rowId}">½</button>
+                    </div>
+                </div>
+            `;
+            
+            bpmEl.querySelector('.btn-bpm-double').addEventListener('click', (e) => {
+                e.stopPropagation();
+                adjustTrackBpm(rowId, 2.0);
+            });
+            
+            bpmEl.querySelector('.btn-bpm-half').addEventListener('click', (e) => {
+                e.stopPropagation();
+                adjustTrackBpm(rowId, 0.5);
+            });
+        }
+
         document.querySelector(`#${rowId} .energy-value`).innerHTML = getEnergyBarHtml(energyLevel);
 
         const genreEl = document.querySelector(`#${rowId} .genre-value`);
@@ -477,6 +506,46 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         const status = document.querySelector(`#${rowId} .status`);
         status.textContent = 'Error';
         status.className = 'status error';
+    }
+}
+
+function adjustTrackBpm(rowId, multiplier) {
+    const tr = document.getElementById(rowId);
+    if (!tr) return;
+    
+    const bpmNumEl = tr.querySelector('.bpm-num');
+    const currentBpm = parseFloat(tr.getAttribute('data-bpm')) || (bpmNumEl ? parseFloat(bpmNumEl.textContent) : 0);
+    if (!currentBpm || currentBpm <= 0) return;
+    
+    const newBpm = parseFloat((currentBpm * multiplier).toFixed(2));
+    if (bpmNumEl) bpmNumEl.textContent = newBpm.toFixed(2);
+    tr.setAttribute('data-bpm', newBpm);
+    
+    const track = exportData.find(d => d.rowId === rowId);
+    if (track) {
+        track.bpm = newBpm;
+        
+        if (track.fileObject) {
+            track.fileObject.arrayBuffer().then(buf => {
+                const updatedBuf = updateID3Tags(buf, track.key, newBpm, {
+                    prependTitle: optTitle.checked,
+                    titleKeyPrefix: `${formatKey(track.key, track.keyText, notationSelect.value)}${track.energy !== '--' ? ` - ${track.energy}` : ''}`,
+                    writeTags: optTags.checked,
+                    grouping: track.grouping,
+                    comments: track.comments,
+                    genre: track.genre
+                }, track.originalName);
+                
+                const updatedFile = new File([updatedBuf], track.newName, { type: track.fileObject.type });
+                fileRegistry[rowId] = updatedFile;
+                track.fileObject = updatedFile;
+            }).catch(e => console.error("Error updating ID3 with new BPM:", e));
+        }
+    }
+    
+    if (typeof currentLoadedRowId !== 'undefined' && currentLoadedRowId === rowId) {
+        const playerBpmEl = document.getElementById('player-bpm');
+        if (playerBpmEl) playerBpmEl.textContent = `${newBpm.toFixed(2)} BPM`;
     }
 }
 
@@ -1065,6 +1134,56 @@ dragOverStyle.textContent = `
 document.head.appendChild(dragOverStyle);
 
 // Exports
+if (exportRekordboxBtn) {
+    exportRekordboxBtn.addEventListener('click', () => {
+        if (exportData.length === 0) return;
+
+        let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+        xml += `<DJ_PLAYLISTS Version="1.0.0">\n`;
+        xml += `  <PRODUCT Name="rekordbox" Version="6.8.5" Company="AlphaTheta"/>\n`;
+        xml += `  <COLLECTION Entries="${exportData.length}">\n`;
+
+        exportData.forEach((track, index) => {
+            const trackId = index + 1;
+            const name = (track.newName || track.originalName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            const comments = (track.comments || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            const grouping = (track.grouping || `Energy ${track.energy || 5}`).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            const genre = (track.genre || 'House').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            const key = track.key || '8A';
+            const bpm = parseFloat(track.bpm) || 124.0;
+            const beatOffset = track.beatOffset || 0.0;
+            
+            xml += `    <TRACK TrackID="${trackId}" Name="${name}" Artist="Unknown" AverageBpm="${bpm.toFixed(2)}" Tonality="${key}" Comments="${comments}" Grouping="${grouping}" Genre="${genre}" Location="Processed_Tracks/${name}">\n`;
+            xml += `      <TEMPO Beginning="${beatOffset.toFixed(3)}" Bpm="${bpm.toFixed(2)}" Metro="4/4" Battito="1"/>\n`;
+            
+            if (track.cues && Array.isArray(track.cues)) {
+                track.cues.forEach((cue, cueIdx) => {
+                    const cueName = (cue.label || `Cue ${cueIdx+1}`).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+                    const cueTime = (cue.time || 0.0).toFixed(3);
+                    xml += `      <POSITION_MARK Name="${cueName}" Type="0" Start="${cueTime}" Num="${cueIdx}" Red="0" Green="229" Blue="255"/>\n`;
+                });
+            }
+            
+            xml += `    </TRACK>\n`;
+        });
+
+        xml += `  </COLLECTION>\n`;
+        xml += `  <PLAYLISTS>\n`;
+        xml += `    <NODE Type="0" Name="ROOT">\n`;
+        xml += `      <NODE Name="CreepyCrate DJ Collection" Type="1" KeyType="0" Entries="${exportData.length}">\n`;
+        exportData.forEach((track, index) => {
+            xml += `        <TRACK Key="${index + 1}"/>\n`;
+        });
+        xml += `      </NODE>\n`;
+        xml += `    </NODE>\n`;
+        xml += `  </PLAYLISTS>\n`;
+        xml += `</DJ_PLAYLISTS>\n`;
+
+        const blob = new Blob([xml], { type: 'application/xml;charset=utf-8;' });
+        triggerDownload(blob, `CreepyCrate_Rekordbox_Collection_${Date.now()}.xml`);
+    });
+}
+
 exportCsvBtn.addEventListener('click', () => {
     if (exportData.length === 0) return;
     
@@ -1968,9 +2087,9 @@ function initMixerDecks() {
         waveColor: '#303045',
         progressColor: 'var(--accent-colour)',
         cursorColor: '#ffffff',
-        barWidth: 1.5,
+        barWidth: 2,
         barGap: 1,
-        height: 50,
+        height: 85,
         normalize: true
     });
     
@@ -1979,9 +2098,9 @@ function initMixerDecks() {
         waveColor: '#303045',
         progressColor: '#e3e553',
         cursorColor: '#ffffff',
-        barWidth: 1.5,
+        barWidth: 2,
         barGap: 1,
-        height: 50,
+        height: 85,
         normalize: true
     });
     
@@ -2007,8 +2126,8 @@ function initMixerDecks() {
         updateMixerControlsState();
     });
     
-    document.getElementById('deck-a-play').addEventListener('click', () => wavesurferA.playPause());
-    document.getElementById('deck-b-play').addEventListener('click', () => wavesurferB.playPause());
+    document.getElementById('deck-a-play').addEventListener('click', () => playDeckQuantized('a'));
+    document.getElementById('deck-b-play').addEventListener('click', () => playDeckQuantized('b'));
     
     const sliderPitchA = document.getElementById('deck-a-pitch');
     const labelPitchA = document.getElementById('deck-a-pitch-label');
@@ -2040,13 +2159,20 @@ function initMixerDecks() {
     
     document.getElementById('deck-a-sync').addEventListener('click', () => syncDeckTo('a'));
     document.getElementById('deck-b-sync').addEventListener('click', () => syncDeckTo('b'));
+    
+    document.getElementById('deck-a-master-key').addEventListener('click', () => toggleDeckMasterKey('a'));
+    document.getElementById('deck-b-master-key').addEventListener('click', () => toggleDeckMasterKey('b'));
+    
     document.getElementById('btn-automix').addEventListener('click', triggerAutoMix);
     
-    // Grid Nudges
+    // Grid Nudges & Set Downbeat (1.1.1)
     document.getElementById('deck-a-grid-left').addEventListener('click', () => nudgeGrid('a', 'left'));
     document.getElementById('deck-a-grid-right').addEventListener('click', () => nudgeGrid('a', 'right'));
     document.getElementById('deck-b-grid-left').addEventListener('click', () => nudgeGrid('b', 'left'));
     document.getElementById('deck-b-grid-right').addEventListener('click', () => nudgeGrid('b', 'right'));
+    
+    document.getElementById('deck-a-set-downbeat').addEventListener('click', () => setDownbeatToCurrentPlayhead('a'));
+    document.getElementById('deck-b-set-downbeat').addEventListener('click', () => setDownbeatToCurrentPlayhead('b'));
     
     // Jog Platter Bends
     document.getElementById('deck-a-bend-left').addEventListener('click', () => triggerJogBend('a', 'left'));
@@ -2212,6 +2338,7 @@ function loadTrackToDeck(deck, timelineIdx) {
             }
             
             wavesurferA.setPlaybackRate(1.00);
+            applyMasterKeySettings('a');
             drawBeatGridLines('a', trackBpmA, trackOffsetA);
             updateMixerControlsState();
         });
@@ -2285,6 +2412,7 @@ function loadTrackToDeck(deck, timelineIdx) {
             }
             
             wavesurferB.setPlaybackRate(1.00);
+            applyMasterKeySettings('b');
             drawBeatGridLines('b', trackBpmB, trackOffsetB);
             updateMixerControlsState();
         });
@@ -2305,20 +2433,83 @@ function drawBeatGridLines(deck, bpm, offset) {
     container.querySelectorAll('.beatgrid-line').forEach(l => l.remove());
     
     const duration = ws.getDuration();
+    if (!duration || duration <= 0) return;
     const beatInterval = 60 / bpm;
     let t = offset;
+    
+    while (t > beatInterval) {
+        t -= beatInterval;
+    }
     
     const wsWrapper = container.querySelector('div');
     if (!wsWrapper) return;
     
+    let beatIndex = 0;
     while (t < duration) {
         const percent = (t / duration) * 100;
         const line = document.createElement('div');
-        line.className = 'beatgrid-line';
+        const isDownbeat = (beatIndex % 4 === 0);
+        line.className = `beatgrid-line ${isDownbeat ? 'downbeat' : 'regular-beat'}`;
         line.style.left = `${percent}%`;
+        if (isDownbeat) {
+            const barNum = Math.floor(beatIndex / 4) + 1;
+            line.setAttribute('data-bar', `${barNum}.1`);
+        }
         wsWrapper.appendChild(line);
         t += beatInterval;
+        beatIndex++;
     }
+}
+
+function setDownbeatToCurrentPlayhead(deck) {
+    const ws = deck === 'a' ? wavesurferA : wavesurferB;
+    if (!ws) return;
+    
+    const currentTime = ws.getCurrentTime();
+    const bpm = deck === 'a' ? trackBpmA : trackBpmB;
+    if (bpm <= 0) return;
+    
+    const beatInterval = 60 / bpm;
+    const newOffset = parseFloat((currentTime % beatInterval).toFixed(4));
+    
+    if (deck === 'a') {
+        trackOffsetA = newOffset;
+        if (loadedTrackIndexA !== -1 && exportData[loadedTrackIndexA]) {
+            exportData[loadedTrackIndexA].beatOffset = newOffset;
+        }
+        drawBeatGridLines('a', trackBpmA, trackOffsetA);
+    } else {
+        trackOffsetB = newOffset;
+        if (loadedTrackIndexB !== -1 && exportData[loadedTrackIndexB]) {
+            exportData[loadedTrackIndexB].beatOffset = newOffset;
+        }
+        drawBeatGridLines('b', trackBpmB, trackOffsetB);
+    }
+    
+    const btn = document.getElementById(`deck-${deck}-set-downbeat`);
+    if (btn) {
+        btn.textContent = 'SET ✔';
+        setTimeout(() => { btn.textContent = 'SET 1.1.1'; }, 1000);
+    }
+}
+
+function playDeckQuantized(deck) {
+    const wsTarget = deck === 'a' ? wavesurferA : wavesurferB;
+    const wsMaster = deck === 'a' ? wavesurferB : wavesurferA;
+    const bpmMaster = deck === 'a' ? trackBpmB : trackBpmA;
+    
+    if (!wsTarget) return;
+    
+    if (wsTarget.isPlaying()) {
+        wsTarget.pause();
+        return;
+    }
+    
+    if (wsMaster && wsMaster.isPlaying() && bpmMaster > 0) {
+        syncDeckTo(deck);
+    }
+    
+    wsTarget.play();
 }
 
 function syncDeckTo(targetDeck) {
@@ -2336,19 +2527,33 @@ function syncDeckTo(targetDeck) {
         wavesurferB.setPlaybackRate(targetRate);
         document.getElementById('deck-b-bpm-display').textContent = `${currentBpmA.toFixed(1)} BPM`;
         
+        const beatIntervalSec = 60.0 / currentBpmA;
+        const barIntervalSec = beatIntervalSec * 4; // 4-beat Bar
+        
+        // Exact 4-beat Bar Downbeat Phase of Master Deck A
         const timeA = wavesurferA.getCurrentTime();
-        const intervalA = 60 / currentBpmA;
-        const phaseA = ((timeA - trackOffsetA) / intervalA) % 1;
-        const normalizedPhaseA = phaseA < 0 ? phaseA + 1 : phaseA;
+        let barPhaseSecA = (timeA - trackOffsetA) % barIntervalSec;
+        if (barPhaseSecA < 0) barPhaseSecA += barIntervalSec;
         
+        // Align Target Deck B to matching 4-beat Bar Downbeat Phase
         const timeB = wavesurferB.getCurrentTime();
-        const intervalB_pitched = 60 / currentBpmA;
+        const numBarsB = Math.round((timeB - trackOffsetB) / barIntervalSec);
+        let targetTimeB = trackOffsetB + numBarsB * barIntervalSec + barPhaseSecA;
+        if (targetTimeB < 0) targetTimeB = trackOffsetB + barPhaseSecA;
         
-        const k = Math.round((timeB - trackOffsetB) / intervalB_pitched - normalizedPhaseA);
-        const targetTimeB = trackOffsetB + (k + normalizedPhaseA) * intervalB_pitched;
-        
-        if (targetTimeB >= 0 && targetTimeB <= wavesurferB.getDuration()) {
+        const durationB = wavesurferB.getDuration();
+        if (targetTimeB >= 0 && targetTimeB <= durationB) {
             wavesurferB.setTime(targetTimeB);
+        }
+        
+        const syncBtnB = document.getElementById('deck-b-sync');
+        if (syncBtnB) {
+            syncBtnB.style.background = 'var(--match-colour)';
+            syncBtnB.style.color = '#000';
+            setTimeout(() => {
+                syncBtnB.style.background = '';
+                syncBtnB.style.color = '';
+            }, 800);
         }
     } else {
         if (trackBpmA <= 0 || trackBpmB <= 0) return;
@@ -2362,19 +2567,33 @@ function syncDeckTo(targetDeck) {
         wavesurferA.setPlaybackRate(targetRate);
         document.getElementById('deck-a-bpm-display').textContent = `${currentBpmB.toFixed(1)} BPM`;
         
+        const beatIntervalSec = 60.0 / currentBpmB;
+        const barIntervalSec = beatIntervalSec * 4; // 4-beat Bar
+        
+        // Exact 4-beat Bar Downbeat Phase of Master Deck B
         const timeB = wavesurferB.getCurrentTime();
-        const intervalB = 60 / currentBpmB;
-        const phaseB = ((timeB - trackOffsetB) / intervalB) % 1;
-        const normalizedPhaseB = phaseB < 0 ? phaseB + 1 : phaseB;
+        let barPhaseSecB = (timeB - trackOffsetB) % barIntervalSec;
+        if (barPhaseSecB < 0) barPhaseSecB += barIntervalSec;
         
+        // Align Target Deck A to matching 4-beat Bar Downbeat Phase
         const timeA = wavesurferA.getCurrentTime();
-        const intervalA_pitched = 60 / currentBpmB;
+        const numBarsA = Math.round((timeA - trackOffsetA) / barIntervalSec);
+        let targetTimeA = trackOffsetA + numBarsA * barIntervalSec + barPhaseSecB;
+        if (targetTimeA < 0) targetTimeA = trackOffsetA + phaseSecB;
         
-        const k = Math.round((timeA - trackOffsetA) / intervalA_pitched - normalizedPhaseB);
-        const targetTimeA = trackOffsetA + (k + normalizedPhaseB) * intervalA_pitched;
-        
-        if (targetTimeA >= 0 && targetTimeA <= wavesurferA.getDuration()) {
+        const durationA = wavesurferA.getDuration();
+        if (targetTimeA >= 0 && targetTimeA <= durationA) {
             wavesurferA.setTime(targetTimeA);
+        }
+        
+        const syncBtnA = document.getElementById('deck-a-sync');
+        if (syncBtnA) {
+            syncBtnA.style.background = 'var(--match-colour)';
+            syncBtnA.style.color = '#000';
+            setTimeout(() => {
+                syncBtnA.style.background = '';
+                syncBtnA.style.color = '';
+            }, 800);
         }
     }
 }
@@ -2467,13 +2686,59 @@ let lastTickIndexB = -1;
 let bendTimeoutA = null;
 let bendTimeoutB = null;
 
+let masterKeyActiveA = true;
+let masterKeyActiveB = true;
+
+function toggleDeckMasterKey(deck) {
+    if (deck === 'a') {
+        masterKeyActiveA = !masterKeyActiveA;
+        applyMasterKeySettings('a');
+    } else {
+        masterKeyActiveB = !masterKeyActiveB;
+        applyMasterKeySettings('b');
+    }
+}
+
+function applyMasterKeySettings(deck) {
+    const ws = deck === 'a' ? wavesurferA : wavesurferB;
+    const active = deck === 'a' ? masterKeyActiveA : masterKeyActiveB;
+    const btn = document.getElementById(`deck-${deck}-master-key`);
+    
+    if (ws) {
+        const media = ws.getMediaElement();
+        if (media) {
+            media.preservesPitch = active;
+            media.mozPreservesPitch = active;
+            media.webkitPreservesPitch = active;
+        }
+    }
+    
+    if (btn) {
+        if (active) {
+            btn.classList.add('active');
+            btn.textContent = 'KEY LOCK';
+            btn.style.background = deck === 'a' ? 'var(--accent-colour)' : '#e3e553';
+            btn.style.color = '#000';
+            btn.style.borderColor = deck === 'a' ? 'var(--accent-colour)' : '#e3e553';
+        } else {
+            btn.classList.remove('active');
+            btn.textContent = 'KEY LOCK OFF';
+            btn.style.background = 'var(--surface-colour)';
+            btn.style.color = 'var(--text-muted)';
+            btn.style.borderColor = 'var(--border-colour)';
+        }
+    }
+}
+
 function enableDeckControls(deck, enabled) {
     const d = deck.toLowerCase();
     document.getElementById(`deck-${d}-play`).disabled = !enabled;
     document.getElementById(`deck-${d}-pitch`).disabled = !enabled;
+    document.getElementById(`deck-${d}-master-key`).disabled = !enabled;
     
     document.getElementById(`deck-${d}-grid-left`).disabled = !enabled;
     document.getElementById(`deck-${d}-grid-right`).disabled = !enabled;
+    document.getElementById(`deck-${d}-set-downbeat`).disabled = !enabled;
     document.getElementById(`deck-${d}-bend-left`).disabled = !enabled;
     document.getElementById(`deck-${d}-bend-right`).disabled = !enabled;
     document.getElementById(`deck-${d}-metronome`).disabled = !enabled;

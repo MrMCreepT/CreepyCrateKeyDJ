@@ -49,6 +49,50 @@
             line-height: 1.2;
         }
 
+        .bpm-container {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .bpm-num {
+            font-weight: 700;
+            font-size: 0.95rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .bpm-multiplier-btns {
+            display: inline-flex;
+            gap: 3px;
+            opacity: 0.75;
+            transition: opacity 0.2s ease;
+        }
+
+        .bpm-multiplier-btns:hover {
+            opacity: 1;
+        }
+
+        .bpm-btn {
+            background: #181824;
+            border: 1px solid #2a2a3c;
+            color: var(--text-muted);
+            font-size: 0.70rem;
+            font-weight: 700;
+            padding: 1px 5px;
+            border-radius: 4px;
+            cursor: pointer;
+            line-height: 1.2;
+            transition: all 0.15s ease;
+        }
+
+        .bpm-btn:hover {
+            background: var(--accent-colour);
+            color: #000;
+            border-color: var(--accent-colour);
+            transform: scale(1.08);
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: var(--bg-colour);
@@ -938,9 +982,41 @@
             top: 0;
             bottom: 0;
             width: 1px;
-            background-color: rgba(255, 255, 255, 0.22);
+            background-color: rgba(255, 255, 255, 0.25);
             pointer-events: none;
             z-index: 5;
+        }
+
+        .beatgrid-line.downbeat {
+            width: 2px;
+            background-color: #ff3366 !important;
+            box-shadow: 0 0 5px rgba(255, 51, 102, 0.9);
+            z-index: 7;
+        }
+
+        .beatgrid-line.downbeat::after {
+            content: attr(data-bar);
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            font-size: 9px;
+            font-weight: 800;
+            color: #ff3366;
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid rgba(255, 51, 102, 0.4);
+            padding: 1px 3px;
+            border-radius: 2px;
+            line-height: 1;
+            font-family: monospace;
+        }
+
+        .deck-waveform {
+            height: 85px;
+            background-color: rgba(10, 10, 15, 0.8);
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            position: relative;
+            overflow: hidden;
         }
 
         /* Stacked layout rules */
@@ -952,7 +1028,7 @@
             flex: 1 1 100%;
         }
         .decks-container.layout-stacked .deck-waveform {
-            height: 70px;
+            height: 95px;
         }
 
         .loop-size-btn.active {
@@ -1006,6 +1082,10 @@
                     <option value="standard">Standard Keys (A Minor)</option>
                 </select>
             </div>
+            <button id="export-rekordbox-btn" disabled>
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                Export Rekordbox XML
+            </button>
             <button id="export-m3u8-btn" disabled>
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
                 Export M3U8 Playlist
@@ -1123,10 +1203,11 @@
                             
                             <!-- Deck A Controls Grid -->
                             <div class="deck-controls-grid" style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px;">
-                                <!-- Row 1: Play, Sync, Pitch, Vol -->
+                                <!-- Row 1: Play, Sync, Key Lock, Pitch, Vol -->
                                 <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                                     <button class="deck-btn play-btn" id="deck-a-play" disabled style="padding: 0.5rem 1rem;">Play</button>
                                     <button class="deck-btn sync-btn" id="deck-a-sync" disabled style="padding: 0.5rem 1rem;">Sync to B</button>
+                                    <button class="deck-btn master-key-btn active" id="deck-a-master-key" data-deck="a" disabled title="Master Key Lock (Preserve musical pitch when changing BPM)" style="padding: 0.5rem 0.8rem; font-size: 0.75rem; font-weight: bold; background: var(--accent-colour); color: #000; border-radius: 4px; cursor: pointer;">KEY LOCK</button>
                                     <div class="slider-container" style="flex-grow: 1; min-width: 100px;">
                                         <label>Pitch: <span id="deck-a-pitch-label">1.00x</span></label>
                                         <input type="range" id="deck-a-pitch" min="0.92" max="1.08" step="0.002" value="1.00" disabled style="width: 100%;">
@@ -1137,13 +1218,16 @@
                                     </div>
                                 </div>
                                 
-                                <!-- Row 2: Grid Nudge, Platter Bend, Metronome -->
+                                <!-- Row 2: Grid Nudge, Set 1.1.1, Platter Bend, Metronome -->
                                 <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                                     <div style="display: flex; align-items: center; gap: 4px;">
                                         <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: bold; text-transform: uppercase;">Grid:</span>
                                         <button class="deck-btn grid-nudge-btn" id="deck-a-grid-left" data-deck="a" data-dir="left" disabled style="padding: 4px 8px; font-size: 0.8rem;">◀</button>
                                         <button class="deck-btn grid-nudge-btn" id="deck-a-grid-right" data-deck="a" data-dir="right" disabled style="padding: 4px 8px; font-size: 0.8rem;">▶</button>
                                     </div>
+                                    <button class="deck-btn set-downbeat-btn" id="deck-a-set-downbeat" data-deck="a" disabled title="Set 1.1.1 Downbeat at current playhead position" style="padding: 4px 8px; font-size: 0.75rem; font-weight: 800; background: rgba(255, 51, 102, 0.15); color: #ff3366; border: 1px solid rgba(255, 51, 102, 0.4); border-radius: 4px; cursor: pointer;">
+                                        SET 1.1.1
+                                    </button>
                                     <div style="display: flex; align-items: center; gap: 4px;">
                                         <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: bold; text-transform: uppercase;">Bend:</span>
                                         <button class="deck-btn jog-bend-btn" id="deck-a-bend-left" data-deck="a" data-dir="left" disabled style="padding: 4px 8px; font-size: 0.8rem;">◀</button>
@@ -1181,10 +1265,11 @@
                             
                             <!-- Deck B Controls Grid -->
                             <div class="deck-controls-grid" style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px;">
-                                <!-- Row 1: Play, Sync, Pitch, Vol -->
+                                <!-- Row 1: Play, Sync, Key Lock, Pitch, Vol -->
                                 <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                                     <button class="deck-btn play-btn" id="deck-b-play" disabled style="padding: 0.5rem 1rem;">Play</button>
                                     <button class="deck-btn sync-btn" id="deck-b-sync" disabled style="padding: 0.5rem 1rem;">Sync to A</button>
+                                    <button class="deck-btn master-key-btn active" id="deck-b-master-key" data-deck="b" disabled title="Master Key Lock (Preserve musical pitch when changing BPM)" style="padding: 0.5rem 0.8rem; font-size: 0.75rem; font-weight: bold; background: #e3e553; color: #000; border-radius: 4px; cursor: pointer;">KEY LOCK</button>
                                     <div class="slider-container" style="flex-grow: 1; min-width: 100px;">
                                         <label>Pitch: <span id="deck-b-pitch-label">1.00x</span></label>
                                         <input type="range" id="deck-b-pitch" min="0.92" max="1.08" step="0.002" value="1.00" disabled style="width: 100%;">
@@ -1195,13 +1280,16 @@
                                     </div>
                                 </div>
                                 
-                                <!-- Row 2: Grid Nudge, Platter Bend, Metronome -->
+                                <!-- Row 2: Grid Nudge, Set 1.1.1, Platter Bend, Metronome -->
                                 <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                                     <div style="display: flex; align-items: center; gap: 4px;">
                                         <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: bold; text-transform: uppercase;">Grid:</span>
                                         <button class="deck-btn grid-nudge-btn" id="deck-b-grid-left" data-deck="b" data-dir="left" disabled style="padding: 4px 8px; font-size: 0.8rem;">◀</button>
                                         <button class="deck-btn grid-nudge-btn" id="deck-b-grid-right" data-deck="b" data-dir="right" disabled style="padding: 4px 8px; font-size: 0.8rem;">▶</button>
                                     </div>
+                                    <button class="deck-btn set-downbeat-btn" id="deck-b-set-downbeat" data-deck="b" disabled title="Set 1.1.1 Downbeat at current playhead position" style="padding: 4px 8px; font-size: 0.75rem; font-weight: 800; background: rgba(255, 51, 102, 0.15); color: #ff3366; border: 1px solid rgba(255, 51, 102, 0.4); border-radius: 4px; cursor: pointer;">
+                                        SET 1.1.1
+                                    </button>
                                     <div style="display: flex; align-items: center; gap: 4px;">
                                         <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: bold; text-transform: uppercase;">Bend:</span>
                                         <button class="deck-btn jog-bend-btn" id="deck-b-bend-left" data-deck="b" data-dir="left" disabled style="padding: 4px 8px; font-size: 0.8rem;">◀</button>
