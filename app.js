@@ -54,9 +54,9 @@ let wavesurfer = null;
 document.addEventListener('DOMContentLoaded', () => {
     wavesurfer = WaveSurfer.create({
         container: '#waveform-container',
-        waveColor: '#3d3d5c',
-        progressColor: '#00e5ff',
-        cursorColor: '#ffffff',
+        waveColor: '#201838',
+        progressColor: '#c084fc',
+        cursorColor: '#f3e8ff',
         barWidth: 2,
         barGap: 1,
         barRadius: 2,
@@ -95,6 +95,17 @@ document.addEventListener('DOMContentLoaded', () => {
     renderCamelotWheel();
     setupSorting();
     setupSidebarFilterListeners();
+    initMixerDecks();
+    initRotaryKnobs();
+    initHotCues('a');
+    initHotCues('b');
+    initBeatJump();
+    setupDragAndDropHandlers();
+
+    const demoBtn = document.getElementById('demo-btn');
+    if (demoBtn) {
+        demoBtn.addEventListener('click', generateStudioDemoTracks);
+    }
 });
 
 function analyseInWorker(channelData, sampleRate, workerIndex) {
@@ -130,12 +141,16 @@ function getCompatibleKeys(camelotCode) {
     ];
 }
 
-// Recursive function to deeply scan folders for MP3s
+// Recursive function to deeply scan folders for DJ audio files
 async function getAudioFilesRecursively(dirHandle) {
     let files = [];
+    const validExtensions = ['.mp3', '.wav', '.aif', '.aiff', '.flac', '.m4a', '.ogg', '.aac'];
     for await (const entry of dirHandle.values()) {
-        if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.mp3')) {
-            files.push(entry);
+        if (entry.kind === 'file') {
+            const lower = entry.name.toLowerCase();
+            if (validExtensions.some(ext => lower.endsWith(ext))) {
+                files.push(entry);
+            }
         } else if (entry.kind === 'directory' && entry.name !== 'Processed_Tracks') {
             const subDirHandle = await dirHandle.getDirectoryHandle(entry.name);
             const nestedFiles = await getAudioFilesRecursively(subDirHandle);
@@ -480,7 +495,7 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
         const actionCell = document.querySelector(`#${rowId} .action-cell`);
         if (actionCell) {
             actionCell.innerHTML = `
-                <button class="action-icon-btn add-to-setlist-btn" data-index="${trackIndex}" title="Add to Setlist Timeline" style="color: var(--accent-colour); padding: 4px 8px; border: 1px solid rgba(0, 229, 255, 0.2); font-size: 0.8rem; border-radius: 4px; font-weight: bold; background: transparent; cursor: pointer;">
+                <button class="action-icon-btn add-to-setlist-btn" data-index="${trackIndex}" title="Add to Setlist Timeline">
                     + Setlist
                 </button>
             `;
@@ -495,8 +510,8 @@ async function processBatchFile(fileHandle, outDirHandle, workerIndex) {
                 btn.style.borderColor = 'var(--match-colour)';
                 setTimeout(() => {
                     btn.textContent = originalText;
-                    btn.style.color = 'var(--accent-colour)';
-                    btn.style.borderColor = 'rgba(0, 229, 255, 0.2)';
+                    btn.style.color = '';
+                    btn.style.borderColor = '';
                 }, 1000);
             });
         }
@@ -1900,8 +1915,8 @@ function renderSetlistTimeline() {
                     </div>
                 </div>
                 <div class="timeline-card-actions">
-                    <button class="action-icon-btn load-deck-btn" data-deck="a" data-index="${i}" title="Load to Deck A" style="color: var(--accent-colour); font-size: 0.75rem; font-weight: 800; border: 1px solid rgba(0, 229, 255, 0.2); padding: 2px 6px;">LOAD A</button>
-                    <button class="action-icon-btn load-deck-btn" data-deck="b" data-index="${i}" title="Load to Deck B" style="color: #e3e553; font-size: 0.75rem; font-weight: 800; border: 1px solid rgba(227, 229, 83, 0.2); padding: 2px 6px;">LOAD B</button>
+                    <button class="action-icon-btn load-deck-btn load-deck-a-btn" data-deck="a" data-index="${i}" title="Load to Deck A">LOAD A</button>
+                    <button class="action-icon-btn load-deck-btn load-deck-b-btn" data-deck="b" data-index="${i}" title="Load to Deck B">LOAD B</button>
                     <button class="action-icon-btn delete-btn remove-timeline-btn" data-index="${i}" title="Remove from Setlist">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                     </button>
@@ -2079,14 +2094,70 @@ let trackBpmB = 0;
 let trackOffsetA = 0;
 let trackOffsetB = 0;
 
+// High-Resolution Hardware Audio Reference Clock & Closed-Loop PI PLL State
+let currentEffectiveRateA = 1.0;
+let currentEffectiveRateB = 1.0;
+let basePitchRateA = 1.0;
+let basePitchRateB = 1.0;
+let pllIntegralError = 0.0;
+let deckA_clockAnchor = { mediaTime: 0, ctxTime: 0, rate: 1.0 };
+let deckB_clockAnchor = { mediaTime: 0, ctxTime: 0, rate: 1.0 };
+
+function updateDeckClockAnchor(deck) {
+    const ws = deck === 'a' ? wavesurferA : wavesurferB;
+    const anchor = deck === 'a' ? deckA_clockAnchor : deckB_clockAnchor;
+    const rate = deck === 'a' ? currentEffectiveRateA : currentEffectiveRateB;
+    if (!ws) return;
+    anchor.mediaTime = ws.getCurrentTime() || 0;
+    anchor.ctxTime = audioContext ? audioContext.currentTime : 0;
+    anchor.rate = rate;
+}
+
+function onDeckTimeUpdate(deck, time) {
+    const anchor = deck === 'a' ? deckA_clockAnchor : deckB_clockAnchor;
+    const rate = deck === 'a' ? currentEffectiveRateA : currentEffectiveRateB;
+    const nowCtx = audioContext ? audioContext.currentTime : 0;
+    
+    // Extrapolated time since last anchor
+    const extrapolated = anchor.mediaTime + (nowCtx - anchor.ctxTime) * anchor.rate;
+    const diff = Math.abs(extrapolated - time);
+    
+    if (diff > 0.08) {
+        // Hard jump or seek detected
+        anchor.mediaTime = time;
+        anchor.ctxTime = nowCtx;
+        anchor.rate = rate;
+    } else {
+        // Soft low-pass blending (0.1 weight) to align with audio decoder clock without stair-stepping
+        anchor.mediaTime = extrapolated * 0.9 + time * 0.1;
+        anchor.ctxTime = nowCtx;
+        anchor.rate = rate;
+    }
+}
+
+function getDeckHighResTime(deck) {
+    const ws = deck === 'a' ? wavesurferA : wavesurferB;
+    const anchor = deck === 'a' ? deckA_clockAnchor : deckB_clockAnchor;
+    if (!ws) return 0;
+    if (!ws.isPlaying()) {
+        return ws.getCurrentTime() || 0;
+    }
+    const elapsedCtx = (audioContext ? audioContext.currentTime : 0) - anchor.ctxTime;
+    if (elapsedCtx < 0 || elapsedCtx > 2.0) {
+        updateDeckClockAnchor(deck);
+        return ws.getCurrentTime() || 0;
+    }
+    return anchor.mediaTime + elapsedCtx * anchor.rate;
+}
+
 function initMixerDecks() {
     if (wavesurferA || wavesurferB) return;
     
     wavesurferA = WaveSurfer.create({
         container: '#waveform-a',
-        waveColor: '#303045',
-        progressColor: 'var(--accent-colour)',
-        cursorColor: '#ffffff',
+        waveColor: '#201838',
+        progressColor: '#a855f7',
+        cursorColor: '#f3e8ff',
         barWidth: 2,
         barGap: 1,
         height: 85,
@@ -2095,9 +2166,9 @@ function initMixerDecks() {
     
     wavesurferB = WaveSurfer.create({
         container: '#waveform-b',
-        waveColor: '#303045',
-        progressColor: '#e3e553',
-        cursorColor: '#ffffff',
+        waveColor: '#201838',
+        progressColor: '#e879f9',
+        cursorColor: '#fce7f3',
         barWidth: 2,
         barGap: 1,
         height: 85,
@@ -2105,26 +2176,34 @@ function initMixerDecks() {
     });
     
     wavesurferA.on('play', () => {
+        updateDeckClockAnchor('a');
         document.getElementById('deck-a-play').classList.add('playing');
         document.getElementById('deck-a-play').textContent = 'Pause';
         updateMixerControlsState();
     });
     wavesurferA.on('pause', () => {
+        updateDeckClockAnchor('a');
         document.getElementById('deck-a-play').classList.remove('playing');
         document.getElementById('deck-a-play').textContent = 'Play';
         updateMixerControlsState();
     });
+    wavesurferA.on('seeking', () => updateDeckClockAnchor('a'));
+    wavesurferA.on('seek', () => updateDeckClockAnchor('a'));
     
     wavesurferB.on('play', () => {
+        updateDeckClockAnchor('b');
         document.getElementById('deck-b-play').classList.add('playing');
         document.getElementById('deck-b-play').textContent = 'Pause';
         updateMixerControlsState();
     });
     wavesurferB.on('pause', () => {
+        updateDeckClockAnchor('b');
         document.getElementById('deck-b-play').classList.remove('playing');
         document.getElementById('deck-b-play').textContent = 'Play';
         updateMixerControlsState();
     });
+    wavesurferB.on('seeking', () => updateDeckClockAnchor('b'));
+    wavesurferB.on('seek', () => updateDeckClockAnchor('b'));
     
     document.getElementById('deck-a-play').addEventListener('click', () => playDeckQuantized('a'));
     document.getElementById('deck-b-play').addEventListener('click', () => playDeckQuantized('b'));
@@ -2133,11 +2212,28 @@ function initMixerDecks() {
     const labelPitchA = document.getElementById('deck-a-pitch-label');
     sliderPitchA.addEventListener('input', () => {
         const rate = parseFloat(sliderPitchA.value);
+        basePitchRateA = rate;
+        currentEffectiveRateA = rate;
+        deckA_clockAnchor.rate = rate;
         labelPitchA.textContent = `${rate.toFixed(2)}x`;
         wavesurferA.setPlaybackRate(rate);
         if (trackBpmA > 0) {
             const currentBpm = trackBpmA * rate;
             document.getElementById('deck-a-bpm-display').textContent = `${currentBpm.toFixed(1)} BPM`;
+            
+            // Master Tempo Tracking: If Deck B is synced to Deck A, track master tempo with full precision!
+            if (syncLockedB && trackBpmB > 0) {
+                const targetRateB = currentBpm / trackBpmB;
+                basePitchRateB = targetRateB;
+                currentEffectiveRateB = targetRateB;
+                deckB_clockAnchor.rate = targetRateB;
+                const sliderB = document.getElementById('deck-b-pitch');
+                sliderB.value = targetRateB.toFixed(4);
+                document.getElementById('deck-b-pitch-label').textContent = `${targetRateB.toFixed(2)}x`;
+                wavesurferB.setPlaybackRate(targetRateB);
+                document.getElementById('deck-b-bpm-display').textContent = `${currentBpm.toFixed(1)} BPM`;
+                pllIntegralError = 0;
+            }
         }
     });
     
@@ -2145,11 +2241,28 @@ function initMixerDecks() {
     const labelPitchB = document.getElementById('deck-b-pitch-label');
     sliderPitchB.addEventListener('input', () => {
         const rate = parseFloat(sliderPitchB.value);
+        basePitchRateB = rate;
+        currentEffectiveRateB = rate;
+        deckB_clockAnchor.rate = rate;
         labelPitchB.textContent = `${rate.toFixed(2)}x`;
         wavesurferB.setPlaybackRate(rate);
         if (trackBpmB > 0) {
             const currentBpm = trackBpmB * rate;
             document.getElementById('deck-b-bpm-display').textContent = `${currentBpm.toFixed(1)} BPM`;
+            
+            // Master Tempo Tracking: If Deck A is synced to Deck B, track master tempo with full precision!
+            if (syncLockedA && trackBpmA > 0) {
+                const targetRateA = currentBpm / trackBpmA;
+                basePitchRateA = targetRateA;
+                currentEffectiveRateA = targetRateA;
+                deckA_clockAnchor.rate = targetRateA;
+                const sliderA = document.getElementById('deck-a-pitch');
+                sliderA.value = targetRateA.toFixed(4);
+                document.getElementById('deck-a-pitch-label').textContent = `${targetRateA.toFixed(2)}x`;
+                wavesurferA.setPlaybackRate(targetRateA);
+                document.getElementById('deck-a-bpm-display').textContent = `${currentBpm.toFixed(1)} BPM`;
+                pllIntegralError = 0;
+            }
         }
     });
     
@@ -2157,8 +2270,8 @@ function initMixerDecks() {
     document.getElementById('deck-b-vol').addEventListener('input', updateDeckVolumes);
     document.getElementById('crossfader').addEventListener('input', updateDeckVolumes);
     
-    document.getElementById('deck-a-sync').addEventListener('click', () => syncDeckTo('a'));
-    document.getElementById('deck-b-sync').addEventListener('click', () => syncDeckTo('b'));
+    document.getElementById('deck-a-sync').addEventListener('click', () => toggleSyncDeck('a'));
+    document.getElementById('deck-b-sync').addEventListener('click', () => toggleSyncDeck('b'));
     
     document.getElementById('deck-a-master-key').addEventListener('click', () => toggleDeckMasterKey('a'));
     document.getElementById('deck-b-master-key').addEventListener('click', () => toggleDeckMasterKey('b'));
@@ -2243,24 +2356,57 @@ function initMixerDecks() {
             }, 100);
         });
     }
+    
+    initSyncEngineLoop();
 }
 
 function updateDeckVolumes() {
-    const volA = parseFloat(document.getElementById('deck-a-vol').value);
-    const volB = parseFloat(document.getElementById('deck-b-vol').value);
-    const crossValue = parseFloat(document.getElementById('crossfader').value);
+    const volAEl = document.getElementById('deck-a-vol');
+    const volBEl = document.getElementById('deck-b-vol');
+    const crossEl = document.getElementById('crossfader');
+    const curveEl = document.getElementById('crossfader-curve');
+    if (!volAEl || !volBEl || !crossEl) return;
+    
+    const volA = parseFloat(volAEl.value);
+    const volB = parseFloat(volBEl.value);
+    const crossValue = parseFloat(crossEl.value); // -1 to +1
+    const curve = curveEl ? curveEl.value : 'smooth';
     
     let gainA = 1;
     let gainB = 1;
     
-    if (crossValue > 0) {
-        gainA = 1 - crossValue;
-    } else if (crossValue < 0) {
-        gainB = 1 + crossValue;
+    if (curve === 'smooth') {
+        // Equal Power Crossfade curve
+        const norm = (crossValue + 1) / 2; // 0 to 1
+        gainA = Math.cos(norm * 0.5 * Math.PI);
+        gainB = Math.sin(norm * 0.5 * Math.PI);
+    } else if (curve === 'cut') {
+        // Scratch / sharp cut curve
+        gainA = crossValue > 0.90 ? 0 : 1;
+        gainB = crossValue < -0.90 ? 0 : 1;
+    } else {
+        // Linear crossfade
+        if (crossValue > 0) {
+            gainA = 1 - crossValue;
+            gainB = 1;
+        } else {
+            gainA = 1;
+            gainB = 1 + crossValue;
+        }
     }
     
-    if (wavesurferA) wavesurferA.setVolume(volA * gainA);
-    if (wavesurferB) wavesurferB.setVolume(volB * gainB);
+    const finalGainA = Math.max(0, Math.min(1, volA * gainA));
+    const finalGainB = Math.max(0, Math.min(1, volB * gainB));
+    
+    if (audioGraphA && audioGraphA.gainNode) {
+        audioGraphA.gainNode.gain.setValueAtTime(finalGainA, audioContext.currentTime);
+    }
+    if (audioGraphB && audioGraphB.gainNode) {
+        audioGraphB.gainNode.gain.setValueAtTime(finalGainB, audioContext.currentTime);
+    }
+    
+    if (wavesurferA) wavesurferA.setVolume(finalGainA);
+    if (wavesurferB) wavesurferB.setVolume(finalGainB);
 }
 
 function loadTrackToDeck(deck, timelineIdx) {
@@ -2301,16 +2447,24 @@ function loadTrackToDeck(deck, timelineIdx) {
         wavesurferA.load(objectUrl);
         wavesurferA.unAll();
         
+        basePitchRateA = 1.0;
+        currentEffectiveRateA = 1.0;
+        updateDeckClockAnchor('a');
+        
         wavesurferA.on('play', () => {
+            updateDeckClockAnchor('a');
             document.getElementById('deck-a-play').classList.add('playing');
             document.getElementById('deck-a-play').textContent = 'Pause';
             updateMixerControlsState();
         });
         wavesurferA.on('pause', () => {
+            updateDeckClockAnchor('a');
             document.getElementById('deck-a-play').classList.remove('playing');
             document.getElementById('deck-a-play').textContent = 'Play';
             updateMixerControlsState();
         });
+        wavesurferA.on('seeking', () => updateDeckClockAnchor('a'));
+        wavesurferA.on('seek', () => updateDeckClockAnchor('a'));
         
         wavesurferA.once('decode', () => {
             const decoded = wavesurferA.getDecodedData();
@@ -2339,11 +2493,16 @@ function loadTrackToDeck(deck, timelineIdx) {
             
             wavesurferA.setPlaybackRate(1.00);
             applyMasterKeySettings('a');
+            setupDeckAudioGraph('a', wavesurferA);
+            populateTrackHotCues('a', track);
             drawBeatGridLines('a', trackBpmA, trackOffsetA);
             updateMixerControlsState();
+            updateDeckClockAnchor('a');
         });
         
         wavesurferA.on('timeupdate', (time) => {
+            onDeckTimeUpdate('a', time);
+            updateDeckTimeDisplay('a', time, wavesurferA.getDuration());
             checkMetronomeTick('a', time);
             checkLoopBoundaries('a', time);
         });
@@ -2375,16 +2534,24 @@ function loadTrackToDeck(deck, timelineIdx) {
         wavesurferB.load(objectUrl);
         wavesurferB.unAll();
         
+        basePitchRateB = 1.0;
+        currentEffectiveRateB = 1.0;
+        updateDeckClockAnchor('b');
+        
         wavesurferB.on('play', () => {
+            updateDeckClockAnchor('b');
             document.getElementById('deck-b-play').classList.add('playing');
             document.getElementById('deck-b-play').textContent = 'Pause';
             updateMixerControlsState();
         });
         wavesurferB.on('pause', () => {
+            updateDeckClockAnchor('b');
             document.getElementById('deck-b-play').classList.remove('playing');
             document.getElementById('deck-b-play').textContent = 'Play';
             updateMixerControlsState();
         });
+        wavesurferB.on('seeking', () => updateDeckClockAnchor('b'));
+        wavesurferB.on('seek', () => updateDeckClockAnchor('b'));
         
         wavesurferB.once('decode', () => {
             const decoded = wavesurferB.getDecodedData();
@@ -2413,11 +2580,16 @@ function loadTrackToDeck(deck, timelineIdx) {
             
             wavesurferB.setPlaybackRate(1.00);
             applyMasterKeySettings('b');
+            setupDeckAudioGraph('b', wavesurferB);
+            populateTrackHotCues('b', track);
             drawBeatGridLines('b', trackBpmB, trackOffsetB);
             updateMixerControlsState();
+            updateDeckClockAnchor('b');
         });
         
         wavesurferB.on('timeupdate', (time) => {
+            onDeckTimeUpdate('b', time);
+            updateDeckTimeDisplay('b', time, wavesurferB.getDuration());
             checkMetronomeTick('b', time);
             checkLoopBoundaries('b', time);
         });
@@ -2493,109 +2665,306 @@ function setDownbeatToCurrentPlayhead(deck) {
     }
 }
 
+let syncLockedA = false;
+let syncLockedB = false;
+
 function playDeckQuantized(deck) {
+    if (audioContext && audioContext.state === 'suspended') {
+        audioContext.resume();
+    }
     const wsTarget = deck === 'a' ? wavesurferA : wavesurferB;
     const wsMaster = deck === 'a' ? wavesurferB : wavesurferA;
+    const masterDeck = deck === 'a' ? 'b' : 'a';
     const bpmMaster = deck === 'a' ? trackBpmB : trackBpmA;
+    const isLocked = deck === 'a' ? syncLockedA : syncLockedB;
     
     if (!wsTarget) return;
     
     if (wsTarget.isPlaying()) {
         wsTarget.pause();
+        updateDeckClockAnchor(deck);
         return;
     }
     
-    if (wsMaster && wsMaster.isPlaying() && bpmMaster > 0) {
-        syncDeckTo(deck);
+    // If master is playing and sync is locked, align phase right before play start
+    if (wsMaster && wsMaster.isPlaying() && bpmMaster > 0 && isLocked) {
+        alignDeckPhaseToMaster(deck, masterDeck);
     }
     
     wsTarget.play();
+    updateDeckClockAnchor(deck);
 }
 
-function syncDeckTo(targetDeck) {
-    if (!wavesurferA || !wavesurferB) return;
+function updatePhaseMeterDisplay(slave, diffMs) {
+    const diffEl = document.getElementById('sync-phase-diff');
+    const barEl = document.getElementById('phase-meter-bar');
+    const badgeEl = document.getElementById('sync-active-badge');
+    if (!diffEl || !barEl || !badgeEl) return;
     
-    if (targetDeck === 'b') {
-        if (trackBpmB <= 0 || trackBpmA <= 0) return;
+    if (slave === 'idle') {
+        diffEl.textContent = '0.0 ms';
+        diffEl.style.color = 'var(--text-muted)';
+        barEl.style.width = '0px';
+        barEl.style.transform = 'translateX(0)';
+        badgeEl.textContent = 'SYNC OFF';
+        badgeEl.classList.remove('locked');
+        return;
+    }
+    
+    badgeEl.textContent = `SYNC (${slave.toUpperCase()})`;
+    badgeEl.classList.add('locked');
+    
+    const absMs = Math.abs(diffMs);
+    diffEl.textContent = `${diffMs >= 0 ? '+' : ''}${diffMs.toFixed(1)} ms`;
+    
+    if (absMs < 2.0) {
+        diffEl.style.color = '#34d399'; // Locked green
+    } else if (absMs < 15.0) {
+        diffEl.style.color = '#fbbf24'; // Amber nudging
+    } else {
+        diffEl.style.color = '#f87171'; // Red out of sync
+    }
+    
+    // Max visual bar deflection is 40px left or right
+    const maxPx = 40;
+    const px = Math.max(-maxPx, Math.min(maxPx, (diffMs / 40.0) * maxPx));
+    barEl.style.width = `${Math.abs(px)}px`;
+    barEl.style.transform = px >= 0 ? 'translateX(0)' : `translateX(${px}px)`;
+    barEl.style.background = absMs < 2.0 ? '#34d399' : (absMs < 15.0 ? '#fbbf24' : '#f87171');
+}
+
+function toggleSyncDeck(targetDeck) {
+    if (!wavesurferA || !wavesurferB) return;
+    if (audioContext && audioContext.state === 'suspended') {
+        audioContext.resume();
+    }
+    
+    const syncBtnA = document.getElementById('deck-a-sync');
+    const syncBtnB = document.getElementById('deck-b-sync');
+    
+    if (targetDeck === 'a') {
+        if (trackBpmA <= 0 || trackBpmB <= 0) return;
         
-        const currentRateA = parseFloat(document.getElementById('deck-a-pitch').value) || 1.0;
-        const currentBpmA = trackBpmA * currentRateA;
-        const targetRate = currentBpmA / trackBpmB;
-        
-        document.getElementById('deck-b-pitch').value = targetRate.toFixed(3);
-        document.getElementById('deck-b-pitch-label').textContent = `${targetRate.toFixed(2)}x`;
-        wavesurferB.setPlaybackRate(targetRate);
-        document.getElementById('deck-b-bpm-display').textContent = `${currentBpmA.toFixed(1)} BPM`;
-        
-        const beatIntervalSec = 60.0 / currentBpmA;
-        const barIntervalSec = beatIntervalSec * 4; // 4-beat Bar
-        
-        // Exact 4-beat Bar Downbeat Phase of Master Deck A
-        const timeA = wavesurferA.getCurrentTime();
-        let barPhaseSecA = (timeA - trackOffsetA) % barIntervalSec;
-        if (barPhaseSecA < 0) barPhaseSecA += barIntervalSec;
-        
-        // Align Target Deck B to matching 4-beat Bar Downbeat Phase
-        const timeB = wavesurferB.getCurrentTime();
-        const numBarsB = Math.round((timeB - trackOffsetB) / barIntervalSec);
-        let targetTimeB = trackOffsetB + numBarsB * barIntervalSec + barPhaseSecA;
-        if (targetTimeB < 0) targetTimeB = trackOffsetB + barPhaseSecA;
-        
-        const durationB = wavesurferB.getDuration();
-        if (targetTimeB >= 0 && targetTimeB <= durationB) {
-            wavesurferB.setTime(targetTimeB);
-        }
-        
-        const syncBtnB = document.getElementById('deck-b-sync');
-        if (syncBtnB) {
-            syncBtnB.style.background = 'var(--match-colour)';
-            syncBtnB.style.color = '#000';
-            setTimeout(() => {
-                syncBtnB.style.background = '';
-                syncBtnB.style.color = '';
-            }, 800);
+        if (syncLockedA) {
+            // Disengage sync on Deck A
+            syncLockedA = false;
+            if (syncBtnA) {
+                syncBtnA.classList.remove('sync-locked');
+                syncBtnA.textContent = 'Sync to B';
+            }
+            updatePhaseMeterDisplay('idle', 0);
+        } else {
+            // Engage sync on Deck A (Deck B is Master)
+            syncLockedA = true;
+            syncLockedB = false;
+            pllIntegralError = 0.0;
+            if (syncBtnA) {
+                syncBtnA.classList.add('sync-locked');
+                syncBtnA.textContent = 'SYNC LOCKED';
+            }
+            if (syncBtnB) {
+                syncBtnB.classList.remove('sync-locked');
+                syncBtnB.textContent = 'Sync to A';
+            }
+            
+            // Match tempo to Master Deck B with full 64-bit IEEE precision
+            const currentBpmB = trackBpmB * basePitchRateB;
+            const targetRateA = currentBpmB / trackBpmA;
+            basePitchRateA = targetRateA;
+            currentEffectiveRateA = targetRateA;
+            deckA_clockAnchor.rate = targetRateA;
+            
+            const sliderA = document.getElementById('deck-a-pitch');
+            if (sliderA) sliderA.value = targetRateA.toFixed(4);
+            document.getElementById('deck-a-pitch-label').textContent = `${targetRateA.toFixed(2)}x`;
+            wavesurferA.setPlaybackRate(targetRateA);
+            document.getElementById('deck-a-bpm-display').textContent = `${currentBpmB.toFixed(1)} BPM`;
+            
+            // Align phase immediately if Master Deck B is rolling
+            if (wavesurferB.isPlaying()) {
+                alignDeckPhaseToMaster('a', 'b');
+            }
+            updatePhaseMeterDisplay('a', 0);
         }
     } else {
         if (trackBpmA <= 0 || trackBpmB <= 0) return;
         
-        const currentRateB = parseFloat(document.getElementById('deck-b-pitch').value) || 1.0;
-        const currentBpmB = trackBpmB * currentRateB;
-        const targetRate = currentBpmB / trackBpmA;
-        
-        document.getElementById('deck-a-pitch').value = targetRate.toFixed(3);
-        document.getElementById('deck-a-pitch-label').textContent = `${targetRate.toFixed(2)}x`;
-        wavesurferA.setPlaybackRate(targetRate);
-        document.getElementById('deck-a-bpm-display').textContent = `${currentBpmB.toFixed(1)} BPM`;
-        
-        const beatIntervalSec = 60.0 / currentBpmB;
-        const barIntervalSec = beatIntervalSec * 4; // 4-beat Bar
-        
-        // Exact 4-beat Bar Downbeat Phase of Master Deck B
-        const timeB = wavesurferB.getCurrentTime();
-        let barPhaseSecB = (timeB - trackOffsetB) % barIntervalSec;
-        if (barPhaseSecB < 0) barPhaseSecB += barIntervalSec;
-        
-        // Align Target Deck A to matching 4-beat Bar Downbeat Phase
-        const timeA = wavesurferA.getCurrentTime();
-        const numBarsA = Math.round((timeA - trackOffsetA) / barIntervalSec);
-        let targetTimeA = trackOffsetA + numBarsA * barIntervalSec + barPhaseSecB;
-        if (targetTimeA < 0) targetTimeA = trackOffsetA + phaseSecB;
-        
-        const durationA = wavesurferA.getDuration();
-        if (targetTimeA >= 0 && targetTimeA <= durationA) {
-            wavesurferA.setTime(targetTimeA);
-        }
-        
-        const syncBtnA = document.getElementById('deck-a-sync');
-        if (syncBtnA) {
-            syncBtnA.style.background = 'var(--match-colour)';
-            syncBtnA.style.color = '#000';
-            setTimeout(() => {
-                syncBtnA.style.background = '';
-                syncBtnA.style.color = '';
-            }, 800);
+        if (syncLockedB) {
+            // Disengage sync on Deck B
+            syncLockedB = false;
+            if (syncBtnB) {
+                syncBtnB.classList.remove('sync-locked');
+                syncBtnB.textContent = 'Sync to A';
+            }
+            updatePhaseMeterDisplay('idle', 0);
+        } else {
+            // Engage sync on Deck B (Deck A is Master)
+            syncLockedB = true;
+            syncLockedA = false;
+            pllIntegralError = 0.0;
+            if (syncBtnB) {
+                syncBtnB.classList.add('sync-locked');
+                syncBtnB.textContent = 'SYNC LOCKED';
+            }
+            if (syncBtnA) {
+                syncBtnA.classList.remove('sync-locked');
+                syncBtnA.textContent = 'Sync to B';
+            }
+            
+            // Match tempo to Master Deck A with full 64-bit IEEE precision
+            const currentBpmA = trackBpmA * basePitchRateA;
+            const targetRateB = currentBpmA / trackBpmB;
+            basePitchRateB = targetRateB;
+            currentEffectiveRateB = targetRateB;
+            deckB_clockAnchor.rate = targetRateB;
+            
+            const sliderB = document.getElementById('deck-b-pitch');
+            if (sliderB) sliderB.value = targetRateB.toFixed(4);
+            document.getElementById('deck-b-pitch-label').textContent = `${targetRateB.toFixed(2)}x`;
+            wavesurferB.setPlaybackRate(targetRateB);
+            document.getElementById('deck-b-bpm-display').textContent = `${currentBpmA.toFixed(1)} BPM`;
+            
+            // Align phase immediately if Master Deck A is rolling
+            if (wavesurferA.isPlaying()) {
+                alignDeckPhaseToMaster('b', 'a');
+            }
+            updatePhaseMeterDisplay('b', 0);
         }
     }
+}
+
+function alignDeckPhaseToMaster(slave, master) {
+    if (!wavesurferA || !wavesurferB) return;
+    const wsSlave = slave === 'a' ? wavesurferA : wavesurferB;
+    const bpmMaster = master === 'a' ? trackBpmA : trackBpmB;
+    const rateMaster = master === 'a' ? basePitchRateA : basePitchRateB;
+    const effBpm = bpmMaster * rateMaster;
+    if (effBpm <= 0) return;
+    
+    const beatSec = 60.0 / effBpm;
+    const offsetMaster = master === 'a' ? trackOffsetA : trackOffsetB;
+    const offsetSlave = slave === 'a' ? trackOffsetA : trackOffsetB;
+    
+    const tMaster = getDeckHighResTime(master);
+    const tSlave = getDeckHighResTime(slave);
+    
+    let phaseMaster = (tMaster - offsetMaster) % beatSec;
+    if (phaseMaster < 0) phaseMaster += beatSec;
+    
+    let phaseSlave = (tSlave - offsetSlave) % beatSec;
+    if (phaseSlave < 0) phaseSlave += beatSec;
+    
+    let diff = phaseSlave - phaseMaster;
+    if (diff > beatSec * 0.5) diff -= beatSec;
+    if (diff < -beatSec * 0.5) diff += beatSec;
+    
+    const targetTime = tSlave - diff;
+    const dur = wsSlave.getDuration();
+    if (targetTime >= 0 && targetTime <= dur) {
+        wsSlave.setTime(targetTime);
+        updateDeckClockAnchor(slave);
+        pllIntegralError = 0.0;
+    }
+}
+
+let syncEngineInterval = null;
+function initSyncEngineLoop() {
+    if (syncEngineInterval) return;
+    syncEngineInterval = setInterval(() => {
+        if (!wavesurferA || !wavesurferB) return;
+        if (!wavesurferA.isPlaying() || !wavesurferB.isPlaying()) {
+            if (!syncLockedA && !syncLockedB) {
+                updatePhaseMeterDisplay('idle', 0);
+            }
+            return;
+        }
+        
+        if (syncLockedA) {
+            maintainDeckPhaseLock('a', 'b');
+        } else if (syncLockedB) {
+            maintainDeckPhaseLock('b', 'a');
+        } else {
+            // Passive phase monitoring between active decks
+            const bpmA = trackBpmA * basePitchRateA;
+            if (bpmA > 0) {
+                const beatSec = 60.0 / bpmA;
+                const pA = ((getDeckHighResTime('a') - trackOffsetA) % beatSec + beatSec) % beatSec;
+                const pB = ((getDeckHighResTime('b') - trackOffsetB) % beatSec + beatSec) % beatSec;
+                let diff = pB - pA;
+                if (diff > beatSec * 0.5) diff -= beatSec;
+                if (diff < -beatSec * 0.5) diff += beatSec;
+                updatePhaseMeterDisplay('idle', diff * 1000);
+            }
+        }
+    }, 25);
+}
+
+function maintainDeckPhaseLock(slave, master) {
+    const wsSlave = slave === 'a' ? wavesurferA : wavesurferB;
+    const bpmMaster = master === 'a' ? trackBpmA : trackBpmB;
+    const bpmSlave = slave === 'a' ? trackBpmA : trackBpmB;
+    const rateMaster = master === 'a' ? basePitchRateA : basePitchRateB;
+    const effBpm = bpmMaster * rateMaster;
+    if (effBpm <= 0 || bpmSlave <= 0) return;
+    
+    const nominalTargetRateSlave = effBpm / bpmSlave;
+    const beatSec = 60.0 / effBpm;
+    const offsetMaster = master === 'a' ? trackOffsetA : trackOffsetB;
+    const offsetSlave = slave === 'a' ? trackOffsetA : trackOffsetB;
+    
+    const tMaster = getDeckHighResTime(master);
+    const tSlave = getDeckHighResTime(slave);
+    
+    let phaseMaster = (tMaster - offsetMaster) % beatSec;
+    if (phaseMaster < 0) phaseMaster += beatSec;
+    
+    let phaseSlave = (tSlave - offsetSlave) % beatSec;
+    if (phaseSlave < 0) phaseSlave += beatSec;
+    
+    let diff = phaseSlave - phaseMaster;
+    if (diff > beatSec * 0.5) diff -= beatSec;
+    if (diff < -beatSec * 0.5) diff += beatSec;
+    
+    const diffMs = diff * 1000;
+    updatePhaseMeterDisplay(slave, diffMs);
+    
+    // Large jump (e.g. manual seek, cue trigger, or loop hop > 45ms): snap seek immediately
+    if (Math.abs(diff) > 0.045) {
+        const target = tSlave - diff;
+        if (target >= 0 && target <= wsSlave.getDuration()) {
+            wsSlave.setTime(target);
+            updateDeckClockAnchor(slave);
+            pllIntegralError = 0.0;
+        }
+    } else {
+        // Continuous Proportional-Integral (PI) closed loop
+        const dt = 0.025;
+        pllIntegralError += diff * dt;
+        // Anti-windup clamping on integral accumulator
+        pllIntegralError = Math.max(-0.06, Math.min(0.06, pllIntegralError));
+        
+        const Kp = 1.2;
+        const Ki = 0.4;
+        const correction = -(Kp * diff + Ki * pllIntegralError);
+        // Clamp correction within +/- 3.5% smooth pull
+        const clampedCorrection = Math.max(-0.035, Math.min(0.035, correction));
+        
+        const effectiveRate = nominalTargetRateSlave * (1.0 + clampedCorrection);
+        wsSlave.setPlaybackRate(effectiveRate);
+        
+        if (slave === 'a') {
+            currentEffectiveRateA = effectiveRate;
+            deckA_clockAnchor.rate = effectiveRate;
+        } else {
+            currentEffectiveRateB = effectiveRate;
+            deckB_clockAnchor.rate = effectiveRate;
+        }
+    }
+}
+
+// Backward-compatibility wrapper for any external callers
+function syncDeckTo(targetDeck) {
+    toggleSyncDeck(targetDeck);
 }
 
 let isAutomixing = false;
@@ -2642,9 +3011,7 @@ function triggerAutoMix() {
             clearInterval(fadeInterval);
             wsSrc.pause();
             
-            crossfader.value = "0";
-            document.getElementById('deck-a-vol').value = sourceDeck === 'a' ? "0.0" : "0.8";
-            document.getElementById('deck-b-vol').value = sourceDeck === 'b' ? "0.0" : "0.8";
+            crossfader.value = endCrossValue.toString();
             updateDeckVolumes();
             
             isAutomixing = false;
@@ -2933,7 +3300,846 @@ function checkLoopBoundaries(deck, time) {
     
     if (ws && time >= end) {
         ws.setTime(start);
+        updateDeckClockAnchor(deck);
     }
 }
+
+/* ==========================================================================
+   STUDIO HARDWARE AUDIO ENGINE: WEB AUDIO DSP, VU METERS & PERFORMANCE CONTROLS
+   ========================================================================== */
+
+let audioGraphA = null;
+let audioGraphB = null;
+let isVuAnimationRunning = false;
+
+function setupDeckAudioGraph(deck, ws) {
+    if (deck === 'a' && audioGraphA) return audioGraphA;
+    if (deck === 'b' && audioGraphB) return audioGraphB;
+    if (!ws) return null;
+    
+    const media = ws.getMediaElement();
+    if (!media) return null;
+    
+    try {
+        if (audioContext.state === 'suspended') {
+            audioContext.resume();
+        }
+        
+        const source = audioContext.createMediaElementSource(media);
+        
+        const eqLow = audioContext.createBiquadFilter();
+        eqLow.type = 'lowshelf';
+        eqLow.frequency.value = 250;
+        eqLow.gain.value = 0;
+        
+        const eqMid = audioContext.createBiquadFilter();
+        eqMid.type = 'peaking';
+        eqMid.frequency.value = 1000;
+        eqMid.Q.value = 1.0;
+        eqMid.gain.value = 0;
+        
+        const eqHi = audioContext.createBiquadFilter();
+        eqHi.type = 'highshelf';
+        eqHi.frequency.value = 3500;
+        eqHi.gain.value = 0;
+        
+        const filterNode = audioContext.createBiquadFilter();
+        filterNode.type = 'allpass';
+        filterNode.frequency.value = 1000;
+        
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = 0.8;
+        
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 64;
+        analyser.smoothingTimeConstant = 0.8;
+        
+        source.connect(eqLow);
+        eqLow.connect(eqMid);
+        eqMid.connect(eqHi);
+        eqHi.connect(filterNode);
+        filterNode.connect(gainNode);
+        gainNode.connect(analyser);
+        analyser.connect(audioContext.destination);
+        
+        const graph = {
+            source,
+            eqLow,
+            eqMid,
+            eqHi,
+            filterNode,
+            gainNode,
+            analyser,
+            kills: { low: false, mid: false, hi: false }
+        };
+        
+        if (deck === 'a') audioGraphA = graph;
+        else audioGraphB = graph;
+        
+        if (!isVuAnimationRunning) {
+            isVuAnimationRunning = true;
+            startVuAnimation();
+        }
+        
+        updateDeckVolumes();
+        return graph;
+    } catch (e) {
+        console.warn(`Deck ${deck} Web Audio graph notice:`, e);
+        return null;
+    }
+}
+
+function startVuAnimation() {
+    const dataA = new Uint8Array(32);
+    const dataB = new Uint8Array(32);
+    
+    function loop() {
+        if (audioGraphA && audioGraphA.analyser && wavesurferA && wavesurferA.isPlaying()) {
+            audioGraphA.analyser.getByteFrequencyData(dataA);
+            let sum = 0;
+            for (let i = 0; i < 16; i++) sum += dataA[i];
+            const avg = sum / 16;
+            const level = Math.min(12, Math.floor((avg / 180) * 12));
+            updateVuLeds('a', level);
+        } else {
+            updateVuLeds('a', 0);
+        }
+        
+        if (audioGraphB && audioGraphB.analyser && wavesurferB && wavesurferB.isPlaying()) {
+            audioGraphB.analyser.getByteFrequencyData(dataB);
+            let sum = 0;
+            for (let i = 0; i < 16; i++) sum += dataB[i];
+            const avg = sum / 16;
+            const level = Math.min(12, Math.floor((avg / 180) * 12));
+            updateVuLeds('b', level);
+        } else {
+            updateVuLeds('b', 0);
+        }
+        
+        requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+}
+
+function updateVuLeds(deck, activeCount) {
+    const segs = document.querySelectorAll(`#deck-${deck}-vu .vu-seg`);
+    segs.forEach((seg, idx) => {
+        if (idx < activeCount) {
+            seg.classList.add('lit');
+        } else {
+            seg.classList.remove('lit');
+        }
+    });
+}
+
+function updateDeckTimeDisplay(deck, time, duration) {
+    const el = document.getElementById(`deck-${deck}-time-display`);
+    if (!el || !duration) return;
+    const remaining = Math.max(0, duration - time);
+    const m = Math.floor(remaining / 60);
+    const s = Math.floor(remaining % 60);
+    const ms = Math.floor((remaining % 1) * 10);
+    el.textContent = `-${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
+}
+
+/* ==========================================================================
+   ROTARY HARDWARE KNOBS & KILL BUTTONS
+   ========================================================================== */
+
+function initRotaryKnobs() {
+    const knobs = document.querySelectorAll('.rotary-knob');
+    knobs.forEach(knob => {
+        const deck = knob.getAttribute('data-deck');
+        const param = knob.getAttribute('data-param');
+        let currentAngle = 0; // -135 to +135 deg
+        let startY = 0;
+        let isDragging = false;
+
+        const onPointerMove = (e) => {
+            if (!isDragging) return;
+            const deltaY = startY - e.clientY;
+            startY = e.clientY;
+            currentAngle = Math.max(-135, Math.min(135, currentAngle + deltaY * 1.8));
+            knob.style.transform = `rotate(${currentAngle}deg)`;
+            applyKnobValue(deck, param, currentAngle);
+        };
+
+        const onPointerUp = () => {
+            isDragging = false;
+            window.removeEventListener('pointermove', onPointerMove);
+            window.removeEventListener('pointerup', onPointerUp);
+        };
+
+        knob.addEventListener('pointerdown', (e) => {
+            isDragging = true;
+            startY = e.clientY;
+            window.addEventListener('pointermove', onPointerMove);
+            window.addEventListener('pointerup', onPointerUp);
+        });
+
+        // Double-click resets to center (0deg = bypass/flat)
+        knob.addEventListener('dblclick', () => {
+            currentAngle = 0;
+            knob.style.transform = `rotate(0deg)`;
+            applyKnobValue(deck, param, 0);
+        });
+
+        // Mousewheel rotation
+        knob.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? 8 : -8;
+            currentAngle = Math.max(-135, Math.min(135, currentAngle + delta));
+            knob.style.transform = `rotate(${currentAngle}deg)`;
+            applyKnobValue(deck, param, currentAngle);
+        });
+    });
+
+    // Kill buttons
+    document.querySelectorAll('.kill-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const deck = btn.getAttribute('data-deck');
+            const band = btn.getAttribute('data-band');
+            btn.classList.toggle('active');
+            const isKill = btn.classList.contains('active');
+            toggleBandKill(deck, band, isKill);
+        });
+    });
+}
+
+function applyKnobValue(deck, param, angle) {
+    const graph = deck === 'a' ? audioGraphA : audioGraphB;
+    if (!graph) return;
+    
+    const norm = angle / 135; // -1 to +1
+    
+    if (param === 'filter') {
+        if (Math.abs(angle) < 6) {
+            graph.filterNode.type = 'allpass';
+            graph.filterNode.frequency.setValueAtTime(1000, audioContext.currentTime);
+        } else if (angle < 0) {
+            // Low Pass Filter sweep
+            graph.filterNode.type = 'lowpass';
+            const freq = 120 * Math.pow(160, (1 + norm));
+            graph.filterNode.frequency.setValueAtTime(Math.max(100, Math.min(20000, freq)), audioContext.currentTime);
+        } else {
+            // High Pass Filter sweep
+            graph.filterNode.type = 'highpass';
+            const freq = 20 * Math.pow(380, norm);
+            graph.filterNode.frequency.setValueAtTime(Math.max(20, Math.min(8000, freq)), audioContext.currentTime);
+        }
+        return;
+    }
+
+    // EQ -40dB up to +6dB
+    let gainDb = 0;
+    if (angle <= 0) {
+        gainDb = (angle / 135) * 40;
+    } else {
+        gainDb = (angle / 135) * 6;
+    }
+
+    const node = param === 'hi' ? graph.eqHi : (param === 'mid' ? graph.eqMid : graph.eqLow);
+    if (node && !graph.kills[param]) {
+        node.gain.setValueAtTime(gainDb, audioContext.currentTime);
+    }
+}
+
+function toggleBandKill(deck, band, isKill) {
+    const graph = deck === 'a' ? audioGraphA : audioGraphB;
+    if (!graph) return;
+    graph.kills[band] = isKill;
+    const node = band === 'hi' ? graph.eqHi : (band === 'mid' ? graph.eqMid : graph.eqLow);
+    if (node) {
+        node.gain.setValueAtTime(isKill ? -70 : 0, audioContext.currentTime);
+    }
+}
+
+/* ==========================================================================
+   PERFORMANCE HOT CUES & BEAT JUMP
+   ========================================================================== */
+
+const deckHotCues = {
+    a: [null, null, null, null],
+    b: [null, null, null, null]
+};
+
+function initHotCues(deck) {
+    for (let i = 0; i < 4; i++) {
+        const btn = document.getElementById(`deck-${deck}-cue-${i}`);
+        if (!btn) continue;
+        btn.addEventListener('click', (e) => {
+            const ws = deck === 'a' ? wavesurferA : wavesurferB;
+            if (!ws) return;
+            
+            if (e.shiftKey) {
+                // Clear cue
+                deckHotCues[deck][i] = null;
+                btn.classList.remove('set');
+                btn.querySelector('.hot-cue-time').textContent = '--:--';
+                return;
+            }
+            
+            if (deckHotCues[deck][i] === null) {
+                // Set Hot Cue at current playhead
+                const time = ws.getCurrentTime();
+                deckHotCues[deck][i] = time;
+                btn.classList.add('set');
+                const m = Math.floor(time / 60);
+                const s = Math.floor(time % 60);
+                const ms = Math.floor((time % 1) * 10);
+                btn.querySelector('.hot-cue-time').textContent = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
+            } else {
+                // Quantized jump to Hot Cue
+                const time = deckHotCues[deck][i];
+                ws.setTime(time);
+                
+                const isLocked = deck === 'a' ? syncLockedA : syncLockedB;
+                const master = deck === 'a' ? 'b' : 'a';
+                const wsMaster = master === 'a' ? wavesurferA : wavesurferB;
+                if (isLocked && wsMaster && wsMaster.isPlaying()) {
+                    alignDeckPhaseToMaster(deck, master);
+                }
+                
+                if (!ws.isPlaying()) ws.play();
+            }
+        });
+    }
+}
+
+function populateTrackHotCues(deck, track) {
+    const cues = track.cues || [];
+    for (let i = 0; i < 4; i++) {
+        const btn = document.getElementById(`deck-${deck}-cue-${i}`);
+        if (!btn) continue;
+        
+        if (cues[i] && cues[i].time !== undefined) {
+            const time = cues[i].time;
+            deckHotCues[deck][i] = time;
+            btn.classList.add('set');
+            const m = Math.floor(time / 60);
+            const s = Math.floor(time % 60);
+            const ms = Math.floor((time % 1) * 10);
+            btn.querySelector('.hot-cue-time').textContent = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
+            btn.setAttribute('title', cues[i].label || `Cue ${i+1}`);
+        } else {
+            deckHotCues[deck][i] = null;
+            btn.classList.remove('set');
+            btn.querySelector('.hot-cue-time').textContent = '--:--';
+        }
+    }
+}
+
+function initBeatJump() {
+    document.querySelectorAll('.jump-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const deck = btn.getAttribute('data-deck');
+            const beats = parseInt(btn.getAttribute('data-beats'), 10);
+            const ws = deck === 'a' ? wavesurferA : wavesurferB;
+            const bpm = deck === 'a' ? trackBpmA : trackBpmB;
+            if (!ws || bpm <= 0) return;
+            const currentPitch = parseFloat(document.getElementById(`deck-${deck}-pitch`).value) || 1.0;
+            const currentBpm = bpm * currentPitch;
+            const jumpSec = beats * (60.0 / currentBpm);
+            const targetTime = Math.max(0, Math.min(ws.getDuration(), ws.getCurrentTime() + jumpSec));
+            ws.setTime(targetTime);
+        });
+    });
+}
+
+/* ==========================================================================
+   STUDIO DEMO TRACKS SYNTHESIZER
+   ========================================================================== */
+
+async function generateStudioDemoTracks() {
+    const demoBtn = document.getElementById('demo-btn');
+    if (demoBtn) {
+        demoBtn.disabled = true;
+        demoBtn.innerHTML = `Synthesizing Demos...`;
+    }
+    
+    try {
+        const demo1 = await synthesizeDemoAudio({
+            bpm: 124.0,
+            keyRoot: 220.0, // A3
+            isMinor: true,
+            title: "Deep Tech Horizon",
+            camelot: "8A",
+            standard: "A Minor",
+            energy: 7,
+            genre: "Deep House",
+            cues: [
+                { time: 0.0, label: "Intro 1.1.1" },
+                { time: 7.742, label: "Drop 1" },
+                { time: 15.484, label: "Breakdown" },
+                { time: 23.226, label: "Peak Drop" }
+            ]
+        });
+        
+        const demo2 = await synthesizeDemoAudio({
+            bpm: 126.0,
+            keyRoot: 164.81, // E3 (Camelot 9A harmonic match)
+            isMinor: true,
+            title: "Neon Sunset Groove",
+            camelot: "9A",
+            standard: "E Minor",
+            energy: 8,
+            genre: "Tech House",
+            cues: [
+                { time: 0.0, label: "Intro 1.1.1" },
+                { time: 7.619, label: "Drop 1" },
+                { time: 15.238, label: "Breakdown" },
+                { time: 22.857, label: "Drop 2" }
+            ]
+        });
+        
+        injectTrackIntoLibrary(demo1);
+        injectTrackIntoLibrary(demo2);
+        
+        // Auto-load demo 1 into Deck A and demo 2 into Deck B for instant hands-on mixing
+        initMixerDecks();
+        loadTrackToDeck('a', 0);
+        loadTrackToDeck('b', 1);
+        
+        if (exportRekordboxBtn) exportRekordboxBtn.disabled = false;
+        exportCsvBtn.disabled = false;
+        exportM3u8Btn.disabled = false;
+        
+        if (demoBtn) {
+            demoBtn.innerHTML = `✔ Demos Loaded!`;
+            setTimeout(() => {
+                demoBtn.disabled = false;
+                demoBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg> Load Studio Demos`;
+            }, 2000);
+        }
+    } catch (e) {
+        console.error("Demo synthesis error:", e);
+        if (demoBtn) {
+            demoBtn.disabled = false;
+            demoBtn.innerHTML = `Load Studio Demos`;
+        }
+    }
+}
+
+async function synthesizeDemoAudio({ bpm, keyRoot, isMinor, title, camelot, standard, energy, genre, cues }) {
+    const bars = 16;
+    const duration = (bars * 4 * 60) / bpm;
+    const sampleRate = 44100;
+    const offlineCtx = new OfflineAudioContext(2, Math.ceil(duration * sampleRate), sampleRate);
+    const beatInterval = 60.0 / bpm;
+    
+    // Synthesize 909 kicks on quarter notes
+    for (let beat = 0; beat < bars * 4; beat++) {
+        const time = beat * beatInterval;
+        
+        const kickOsc = offlineCtx.createOscillator();
+        const kickGain = offlineCtx.createGain();
+        kickOsc.connect(kickGain);
+        kickGain.connect(offlineCtx.destination);
+        
+        kickOsc.frequency.setValueAtTime(140, time);
+        kickOsc.frequency.exponentialRampToValueAtTime(45, time + 0.12);
+        
+        kickGain.gain.setValueAtTime(0.85, time);
+        kickGain.gain.exponentialRampToValueAtTime(0.001, time + 0.28);
+        
+        kickOsc.start(time);
+        kickOsc.stop(time + 0.3);
+        
+        // Hi-Hat on offbeats
+        const hatTime = time + beatInterval * 0.5;
+        const hatBuf = offlineCtx.createBuffer(1, Math.floor(sampleRate * 0.05), sampleRate);
+        const data = hatBuf.getChannelData(0);
+        for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sampleRate * 0.012));
+        const hatSrc = offlineCtx.createBufferSource();
+        const hatFilter = offlineCtx.createBiquadFilter();
+        hatFilter.type = 'highpass';
+        hatFilter.frequency.value = 7500;
+        const hatGain = offlineCtx.createGain();
+        hatGain.gain.value = 0.35;
+        
+        hatSrc.buffer = hatBuf;
+        hatSrc.connect(hatFilter);
+        hatFilter.connect(hatGain);
+        hatGain.connect(offlineCtx.destination);
+        
+        hatSrc.start(hatTime);
+    }
+    
+    // Synthesize rolling bassline on 16ths
+    const bassNotes = isMinor ? [keyRoot * 0.5, keyRoot * 0.594, keyRoot * 0.667, keyRoot * 0.749] : [keyRoot * 0.5, keyRoot * 0.561, keyRoot * 0.667, keyRoot * 0.749];
+    for (let bar = 0; bar < bars; bar++) {
+        for (let step = 0; step < 16; step++) {
+            if (step % 2 === 1 || step === 0 || step === 6 || step === 10) {
+                const noteTime = bar * (beatInterval * 4) + step * (beatInterval * 0.25);
+                const noteFreq = bassNotes[(bar + Math.floor(step / 4)) % bassNotes.length];
+                
+                const bassOsc = offlineCtx.createOscillator();
+                bassOsc.type = 'sawtooth';
+                const bassFilter = offlineCtx.createBiquadFilter();
+                bassFilter.type = 'lowpass';
+                bassFilter.frequency.setValueAtTime(450, noteTime);
+                bassFilter.frequency.exponentialRampToValueAtTime(140, noteTime + 0.12);
+                
+                const bassGain = offlineCtx.createGain();
+                bassGain.gain.setValueAtTime(0.48, noteTime);
+                bassGain.gain.exponentialRampToValueAtTime(0.001, noteTime + 0.15);
+                
+                bassOsc.connect(bassFilter);
+                bassFilter.connect(bassGain);
+                bassGain.connect(offlineCtx.destination);
+                
+                bassOsc.frequency.setValueAtTime(noteFreq, noteTime);
+                bassOsc.start(noteTime);
+                bassOsc.stop(noteTime + 0.18);
+            }
+        }
+    }
+    
+    const rendered = await offlineCtx.startRendering();
+    const wavBlob = audioBufferToWavBlob(rendered);
+    const fileName = `${camelot} - ${energy} - ${title}.wav`;
+    const file = new File([wavBlob], fileName, { type: 'audio/wav' });
+    
+    return {
+        file,
+        fileName,
+        title,
+        bpm: bpm.toFixed(2),
+        key: camelot,
+        keyText: standard,
+        energy,
+        genre,
+        cues,
+        beatOffset: 0.0,
+        tags: [genre, "Club Ready", "Mastered"]
+    };
+}
+
+function audioBufferToWavBlob(buffer) {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const numSamples = buffer.length;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = numSamples * blockAlign;
+    const headerSize = 44;
+    const totalSize = headerSize + dataSize;
+    
+    const arrayBuffer = new ArrayBuffer(totalSize);
+    const view = new DataView(arrayBuffer);
+    
+    function writeString(offset, str) {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    }
+    
+    writeString(0, 'RIFF');
+    view.setUint32(4, totalSize - 8, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+    
+    const ch0 = buffer.getChannelData(0);
+    const ch1 = numChannels > 1 ? buffer.getChannelData(1) : ch0;
+    
+    let offset = 44;
+    for (let i = 0; i < numSamples; i++) {
+        let s0 = Math.max(-1, Math.min(1, ch0[i]));
+        view.setInt16(offset, s0 < 0 ? s0 * 0x8000 : s0 * 0x7FFF, true);
+        offset += 2;
+        if (numChannels > 1) {
+            let s1 = Math.max(-1, Math.min(1, ch1[i]));
+            view.setInt16(offset, s1 < 0 ? s1 * 0x8000 : s1 * 0x7FFF, true);
+            offset += 2;
+        }
+    }
+    return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+function injectTrackIntoLibrary(trackData) {
+    const rowId = `track-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+    fileRegistry[rowId] = trackData.file;
+    
+    const trackEntry = {
+        originalName: trackData.title + ".wav",
+        newName: trackData.fileName,
+        bpm: trackData.bpm,
+        key: trackData.key,
+        keyText: trackData.keyText,
+        energy: trackData.energy,
+        genre: trackData.genre,
+        rating: 5,
+        tuningHz: 440.0,
+        tuningCents: 0,
+        cues: trackData.cues,
+        tags: trackData.tags,
+        grouping: `Energy ${trackData.energy}`,
+        comments: trackData.tags.join(", "),
+        beatOffset: trackData.beatOffset,
+        fileObject: trackData.file,
+        rowId: rowId
+    };
+    
+    exportData.push(trackEntry);
+    const trackIndex = exportData.length - 1;
+    
+    const tr = document.createElement('tr');
+    tr.id = rowId;
+    tr.className = 'track-row ready';
+    tr.setAttribute('data-key', trackData.key);
+    tr.setAttribute('data-key-text', trackData.keyText);
+    tr.setAttribute('data-bpm', trackData.bpm);
+    tr.setAttribute('data-energy', trackData.energy);
+    tr.setAttribute('data-genre', trackData.genre);
+    tr.setAttribute('data-tags', trackData.tags.join(', '));
+    
+    const badgeColour = `var(--cam-${trackData.key.toLowerCase()})`;
+    
+    tr.innerHTML = `
+        <td class="track-name" title="${trackData.title}">${trackData.title}</td>
+        <td class="new-name" title="${trackData.fileName}">${trackData.fileName}</td>
+        <td class="bpm-value">
+            <div class="bpm-container">
+                <span class="bpm-num">${trackData.bpm}</span>
+                <div class="bpm-multiplier-btns">
+                    <button class="bpm-btn btn-bpm-double" title="Double BPM" data-row="${rowId}">2×</button>
+                    <button class="bpm-btn btn-bpm-half" title="Halve BPM" data-row="${rowId}">½</button>
+                </div>
+            </div>
+        </td>
+        <td>
+            <span class="badge" style="background-color: ${badgeColour}; color: #000;">${trackData.key}</span>
+            <span class="match-indicator">Match</span>
+        </td>
+        <td class="energy-value">${getEnergyBarHtml(trackData.energy)}</td>
+        <td class="genre-value">${trackData.genre}</td>
+        <td class="tags-value">${renderTagBadgesHtml(trackData.tags)}</td>
+        <td class="status complete">Ready</td>
+        <td class="action-cell">
+            <button class="action-icon-btn add-to-setlist-btn" data-index="${trackIndex}" title="Add to Setlist Timeline">
+                + Setlist
+            </button>
+        </td>
+    `;
+    
+    tr.querySelector('.btn-bpm-double').addEventListener('click', (e) => {
+        e.stopPropagation();
+        adjustTrackBpm(rowId, 2.0);
+    });
+    tr.querySelector('.btn-bpm-half').addEventListener('click', (e) => {
+        e.stopPropagation();
+        adjustTrackBpm(rowId, 0.5);
+    });
+    tr.querySelector('.add-to-setlist-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        addTrackToSetlist(trackIndex);
+    });
+    
+    resultsBody.appendChild(tr);
+    addTrackToSetlist(trackIndex);
+    populateSidebarGenres();
+    renderSetlistSidebar();
+}
+
+/* ==========================================================================
+   DRAG AND DROP FILE PROCESSING
+   ========================================================================== */
+
+function setupDragAndDropHandlers() {
+    ['dragenter', 'dragover'].forEach(name => {
+        window.addEventListener(name, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            document.body.classList.add('drop-zone-active');
+        });
+    });
+    
+    ['dragleave', 'drop'].forEach(name => {
+        window.addEventListener(name, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            document.body.classList.remove('drop-zone-active');
+        });
+    });
+    
+    window.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        const validExtensions = ['.mp3', '.wav', '.aif', '.aiff', '.flac', '.m4a', '.ogg', '.aac'];
+        const files = Array.from(e.dataTransfer.files).filter(f => {
+            const lower = f.name.toLowerCase();
+            return validExtensions.some(ext => lower.endsWith(ext));
+        });
+        if (files.length > 0) {
+            await processUploadedFileList(files);
+        }
+    });
+}
+
+async function processUploadedFileList(files) {
+    if (!files || files.length === 0) return;
+    
+    isAnalyzing = true;
+    progressContainer.style.display = 'block';
+    progressText.style.display = 'block';
+    updateProgress(0, files.length);
+    
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const rowId = `track-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+        const tr = document.createElement('tr');
+        tr.id = rowId;
+        tr.className = 'track-row';
+        tr.innerHTML = `
+            <td class="track-name" title="${file.name}">${file.name}</td>
+            <td class="new-name" title="-">-</td>
+            <td class="bpm-value">-</td>
+            <td>
+                <span class="badge" style="background-color: var(--border-colour); color: var(--text-main);">-</span>
+                <span class="match-indicator">Match</span>
+            </td>
+            <td class="energy-value">-</td>
+            <td class="genre-value">-</td>
+            <td class="tags-value">-</td>
+            <td class="status loading">Analysing...</td>
+            <td class="action-cell">-</td>
+        `;
+        resultsBody.appendChild(tr);
+        
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            const parsedTags = parseID3TagsFromBuffer(arrayBuffer);
+            const genre = parsedTags.genre || "Unknown";
+            
+            const decodedAudio = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+            const channelData = decodedAudio.getChannelData(0);
+            
+            const workerIndex = i % poolSize;
+            const dspResult = await analyseInWorker(channelData, decodedAudio.sampleRate, workerIndex);
+            
+            const bpm = dspResult.bpm || 120.0;
+            const camelotCode = dspResult.camelotCode || "8A";
+            const keyText = dspResult.keyText || "A Minor";
+            const energyLevel = dspResult.energyLevel || calculateEnergyLevel(channelData);
+            const performanceTags = dspResult.tags || [];
+            const groupingStr = dspResult.grouping || `Energy ${energyLevel}`;
+            const commentsStr = dspResult.comments || performanceTags.join(", ");
+            const genreVal = dspResult.genre || (genre !== "Unknown" ? genre : "House");
+            const beatOffset = dspResult.beatOffset || locateBeatGrid(channelData, decodedAudio.sampleRate, bpm);
+            
+            const format = notationSelect.value;
+            const chosenKey = formatKey(camelotCode, keyText, format);
+            const energyStr = (energyLevel !== '--') ? `${energyLevel} - ` : '';
+            const cleanFilename = stripKeyPrefix(file.name);
+            const savedFilename = optFilename.checked ? `${chosenKey} - ${energyStr}${cleanFilename}` : file.name;
+            
+            fileRegistry[rowId] = file;
+            
+            exportData.push({
+                originalName: file.name,
+                newName: savedFilename,
+                bpm: bpm,
+                key: camelotCode,
+                keyText: keyText,
+                energy: energyLevel,
+                genre: genreVal,
+                rating: dspResult.rating || 3,
+                tuningHz: dspResult.tuningHz || 440.0,
+                tuningCents: dspResult.tuningCents || 0,
+                cues: dspResult.cues || [],
+                tags: performanceTags,
+                grouping: groupingStr,
+                comments: commentsStr,
+                beatOffset: beatOffset,
+                fileObject: file,
+                rowId: rowId
+            });
+            
+            const trackIndex = exportData.length - 1;
+            const badgeColour = camelotCode !== "Unknown" ? `var(--cam-${camelotCode.toLowerCase()})` : "var(--border-colour)";
+            
+            tr.setAttribute('data-key', camelotCode);
+            tr.setAttribute('data-key-text', keyText);
+            tr.setAttribute('data-bpm', bpm);
+            tr.setAttribute('data-energy', energyLevel);
+            tr.setAttribute('data-genre', genreVal);
+            tr.setAttribute('data-tags', commentsStr || performanceTags.join(', '));
+            tr.classList.add('ready');
+            
+            tr.querySelector('.new-name').textContent = savedFilename;
+            tr.querySelector('.bpm-value').innerHTML = `
+                <div class="bpm-container">
+                    <span class="bpm-num">${bpm}</span>
+                    <div class="bpm-multiplier-btns">
+                        <button class="bpm-btn btn-bpm-double" title="Double BPM" data-row="${rowId}">2×</button>
+                        <button class="bpm-btn btn-bpm-half" title="Halve BPM" data-row="${rowId}">½</button>
+                    </div>
+                </div>
+            `;
+            tr.querySelector('.btn-bpm-double').addEventListener('click', (e) => {
+                e.stopPropagation();
+                adjustTrackBpm(rowId, 2.0);
+            });
+            tr.querySelector('.btn-bpm-half').addEventListener('click', (e) => {
+                e.stopPropagation();
+                adjustTrackBpm(rowId, 0.5);
+            });
+            
+            tr.querySelector('.energy-value').innerHTML = getEnergyBarHtml(energyLevel);
+            tr.querySelector('.genre-value').textContent = genreVal;
+            tr.querySelector('.tags-value').innerHTML = renderTagBadgesHtml(performanceTags);
+            
+            const badge = tr.querySelector('.badge');
+            badge.textContent = chosenKey;
+            badge.style.backgroundColor = badgeColour;
+            badge.style.color = '#000';
+            
+            const status = tr.querySelector('.status');
+            status.textContent = 'Ready';
+            status.className = 'status complete';
+            
+            const actionCell = tr.querySelector('.action-cell');
+            actionCell.innerHTML = `
+                <button class="action-icon-btn add-to-setlist-btn" data-index="${trackIndex}" title="Add to Setlist Timeline">
+                    + Setlist
+                </button>
+            `;
+            actionCell.querySelector('.add-to-setlist-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                addTrackToSetlist(trackIndex);
+            });
+            
+            addTrackToSetlist(trackIndex);
+            
+        } catch (err) {
+            console.error(`Error analysing ${file.name}:`, err);
+            const status = tr.querySelector('.status');
+            if (status) {
+                status.textContent = 'Error';
+                status.className = 'status error';
+            }
+        }
+        
+        updateProgress(i + 1, files.length);
+    }
+    
+    isAnalyzing = false;
+    progressText.textContent = "Processing Complete!";
+    if (exportRekordboxBtn) exportRekordboxBtn.disabled = false;
+    exportCsvBtn.disabled = false;
+    exportM3u8Btn.disabled = false;
+    populateSidebarGenres();
+    renderSetlistSidebar();
+}
+
 
 

@@ -114,55 +114,31 @@ function pearsonCorrelation(x, y) {
 function detectPrecisionKey(channelData, sampleRate) {
     const totalSamples = channelData.length;
     
-    // Multi-segment analysis across 6 strategic sections of the track
-    const windowRatios = [0.12, 0.28, 0.45, 0.60, 0.75, 0.88];
-    const snippetSec = 10;
+    // Strategic musical analysis windows (18% to 78% of track, targeting musical body & breakdowns)
+    const windowRatios = [0.18, 0.28, 0.38, 0.48, 0.58, 0.68, 0.78];
+    const snippetSec = 8;
     const snippetSamples = Math.floor(snippetSec * sampleRate);
     
     const targetSampleRate = 11025;
     const factor = Math.max(1, Math.round(sampleRate / targetSampleRate));
     const dsSampleRate = sampleRate / factor;
     
-    // 72 Semitone Bins covering 6 Octaves: C1 (~32.7 Hz) to B6 (~1975.5 Hz)
-    const minMidi = 24; // C1
-    const maxMidi = 95; // B6
-    const numNotes = maxMidi - minMidi + 1;
+    const N = 4096;
+    const hop = 2048;
     
-    // Master Reference Tuning Detection (Detect if track is tuned to 432Hz or detuned by vinyl pitch)
-    let detectedTuningHz = 440.0;
-    let detectedCents = 0;
-    
-    const freqs = new Float32Array(numNotes);
-    for (let m = 0; m < numNotes; m++) {
-        freqs[m] = 440.0 * Math.pow(2, (m + minMidi - 69) / 12);
-    }
-    
-    const N = 1024;
-    const hop = 512;
+    // Hann Window for smooth spectral leakage control
     const window = new Float32Array(N);
     for (let n = 0; n < N; n++) {
-        // Blackman-Harris window for maximum sidelobe suppression (92 dB)
-        const a0 = 0.35875, a1 = 0.48829, a2 = 0.14128, a3 = 0.01168;
-        const arg = (2 * Math.PI * n) / (N - 1);
-        window[n] = a0 - a1 * Math.cos(arg) + a2 * Math.cos(2 * arg) - a3 * Math.cos(3 * arg);
+        window[n] = 0.5 * (1 - Math.cos((2 * Math.PI * n) / (N - 1)));
     }
     
-    const cosTable = [];
-    const sinTable = [];
-    for (let f = 0; f < numNotes; f++) {
-        const omega = (2 * Math.PI * freqs[f]) / dsSampleRate;
-        const cosRow = new Float32Array(N);
-        const sinRow = new Float32Array(N);
-        for (let k = 0; k < N; k++) {
-            cosRow[k] = Math.cos(omega * k);
-            sinRow[k] = Math.sin(omega * k);
-        }
-        cosTable.push(cosRow);
-        sinTable.push(sinRow);
-    }
+    // Tonal frequency range: 65 Hz (C2) to 1350 Hz (E6)
+    const minBin = Math.max(1, Math.floor(65 * N / dsSampleRate));
+    const maxBin = Math.min(Math.floor(N / 2), Math.ceil(1350 * N / dsSampleRate));
     
     const chromaTotal = new Float32Array(12);
     const chromaBass = new Float32Array(12);
+    const centOffsets = [];
     
     for (let w = 0; w < windowRatios.length; w++) {
         const centerSample = Math.floor(totalSamples * windowRatios[w]);
@@ -170,40 +146,79 @@ function detectPrecisionKey(channelData, sampleRate) {
         if (startSample < 0 || startSample + snippetSamples > totalSamples) continue;
         
         const rawSnippet = channelData.subarray(startSample, startSample + snippetSamples);
-        const filteredSnippet = applyBandpassFilter(rawSnippet, sampleRate, 45, 3200);
+        // Bandpass filter to isolate musical fundamentals (60 Hz - 1400 Hz), stripping sub-bass kick rumble and percussion hiss
+        const filteredSnippet = applyBandpassFilter(rawSnippet, sampleRate, 60, 1400);
         
-        const dsPcm = [];
-        for (let i = 0; i < filteredSnippet.length; i += factor) {
-            dsPcm.push(filteredSnippet[i]);
+        const dsLength = Math.floor(filteredSnippet.length / factor);
+        const dsPcm = new Float32Array(dsLength);
+        for (let i = 0, j = 0; i < filteredSnippet.length && j < dsLength; i += factor, j++) {
+            dsPcm[j] = filteredSnippet[i];
         }
         
+        const frame = new Float32Array(N);
         for (let offset = 0; offset + N <= dsPcm.length; offset += hop) {
-            const frame = new Float32Array(N);
+            let energy = 0;
             for (let k = 0; k < N; k++) {
                 frame[k] = dsPcm[offset + k] * window[k];
+                energy += frame[k] * frame[k];
+            }
+            if (energy < 1e-4) continue; // Skip near-silent frames
+            
+            // Real DFT on bins from minBin to maxBin
+            const mags = new Float32Array(maxBin + 2);
+            for (let k = minBin; k <= maxBin; k++) {
+                let real = 0, imag = 0;
+                const omega = (2 * Math.PI * k) / N;
+                for (let n = 0; n < N; n++) {
+                    const sampleVal = frame[n];
+                    real += sampleVal * Math.cos(omega * n);
+                    imag -= sampleVal * Math.sin(omega * n);
+                }
+                mags[k] = Math.sqrt(real * real + imag * imag);
             }
             
-            for (let f = 0; f < numNotes; f++) {
-                const freq = freqs[f];
-                if (freq < 30 || freq > 3200) continue;
+            // High-resolution spectral peak detection with parabolic interpolation
+            for (let k = minBin + 1; k < maxBin - 1; k++) {
+                const mPrev = mags[k - 1];
+                const mCur = mags[k];
+                const mNext = mags[k + 1];
                 
-                let real = 0;
-                let imag = 0;
-                const cosRow = cosTable[f];
-                const sinRow = sinTable[f];
-                for (let k = 0; k < N; k++) {
-                    real += frame[k] * cosRow[k];
-                    imag += frame[k] * sinRow[k];
-                }
-                const mag = Math.sqrt(real * real + imag * imag);
-                const pitchClass = (minMidi + f) % 12;
-                
-                chromaTotal[pitchClass] += mag;
-                if (freq <= 250) {
-                    chromaBass[pitchClass] += mag * 2.0; // Heavy weighting on fundamental bassline notes
+                // Peak qualification with prominence threshold
+                if (mCur > mPrev && mCur > mNext && mCur > 0.008) {
+                    // Parabolic interpolation for true peak frequency
+                    const delta = 0.5 * (mPrev - mNext) / (mPrev - 2 * mCur + mNext);
+                    const trueBin = k + delta;
+                    const trueFreq = (trueBin * dsSampleRate) / N;
+                    
+                    if (trueFreq >= 65 && trueFreq <= 1350) {
+                        // MIDI note calculation with continuous pitch
+                        const rawMidi = 69 + 12 * Math.log2(trueFreq / 440);
+                        const nominalMidi = Math.round(rawMidi);
+                        const centDeviation = (rawMidi - nominalMidi) * 100;
+                        if (Math.abs(centDeviation) < 50) {
+                            centOffsets.push(centDeviation);
+                        }
+                        
+                        const pitchClass = ((nominalMidi % 12) + 12) % 12;
+                        const weight = mCur * mCur; // Quadratic weighting for spectral dominance
+                        
+                        chromaTotal[pitchClass] += weight;
+                        if (trueFreq <= 220) {
+                            chromaBass[pitchClass] += weight; // Heavy weighting on bassline tonic notes
+                        }
+                    }
                 }
             }
         }
+    }
+    
+    // Master Reference Tuning Detection (432Hz or vinyl pitch drift)
+    let detectedTuningHz = 440.0;
+    let detectedCents = 0;
+    if (centOffsets.length > 20) {
+        centOffsets.sort((a, b) => a - b);
+        detectedCents = Math.round(centOffsets[Math.floor(centOffsets.length / 2)]);
+        detectedTuningHz = parseFloat((440.0 * Math.pow(2, detectedCents / 1200)).toFixed(1));
     }
     
     // Normalize chroma vectors
@@ -216,27 +231,11 @@ function detectPrecisionKey(channelData, sampleRate) {
         for (let i = 0; i < 12; i++) chromaBass[i] /= sumBass;
     }
     
-    // Harmonic Overtone Suppression: Dampens 3rd harmonic (+7 semitones / 5th) and 5th harmonic (+4 semitones / Major 3rd)
-    const cleanedChroma = new Float32Array(12);
-    for (let i = 0; i < 12; i++) cleanedChroma[i] = chromaTotal[i];
-    
-    for (let i = 0; i < 12; i++) {
-        const fifth = (i + 7) % 12;
-        const majorThird = (i + 4) % 12;
-        cleanedChroma[fifth] = Math.max(0, cleanedChroma[fifth] - chromaTotal[i] * 0.24);
-        cleanedChroma[majorThird] = Math.max(0, cleanedChroma[majorThird] - chromaTotal[i] * 0.14);
-    }
-    
-    const sumCleaned = cleanedChroma.reduce((a, b) => a + b, 0);
-    if (sumCleaned > 0) {
-        for (let i = 0; i < 12; i++) cleanedChroma[i] /= sumCleaned;
-    }
-    
-    // Industry-Standard Sha'ath & Temperley Key Correlation Matrices
-    const shaathMajor = [0.748, 0.060, 0.488, 0.082, 0.670, 0.460, 0.096, 0.715, 0.104, 0.383, 0.084, 0.352];
-    const shaathMinor = [0.712, 0.084, 0.376, 0.608, 0.104, 0.460, 0.096, 0.715, 0.396, 0.116, 0.456, 0.096];
-    const temperleyMajor = [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0];
-    const temperleyMinor = [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 3.5];
+    // Dual Empirical Tonal Profiles: Krumhansl-Kessler & Temperley
+    const krumhanslMaj = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+    const krumhanslMin = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+    const tempMaj = [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0];
+    const tempMin = [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 3.5];
     
     const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
     
@@ -252,29 +251,24 @@ function detectPrecisionKey(channelData, sampleRate) {
     const candidates = [];
     
     for (let shift = 0; shift < 12; shift++) {
-        const shiftedShaathMaj = new Array(12);
-        const shiftedShaathMin = new Array(12);
-        const shiftedTempMaj = new Array(12);
-        const shiftedTempMin = new Array(12);
+        const shiftedKMaj = new Array(12);
+        const shiftedKMin = new Array(12);
+        const shiftedTMaj = new Array(12);
+        const shiftedTMin = new Array(12);
         
         for (let i = 0; i < 12; i++) {
             const idx = (i - shift + 12) % 12;
-            shiftedShaathMaj[i] = shaathMajor[idx];
-            shiftedShaathMin[i] = shaathMinor[idx];
-            shiftedTempMaj[i] = temperleyMajor[idx];
-            shiftedTempMin[i] = temperleyMinor[idx];
+            shiftedKMaj[i] = krumhanslMaj[idx];
+            shiftedKMin[i] = krumhanslMin[idx];
+            shiftedTMaj[i] = tempMaj[idx];
+            shiftedTMin[i] = tempMin[idx];
         }
         
-        const sMaj = pearsonCorrelation(cleanedChroma, shiftedShaathMaj);
-        const sMin = pearsonCorrelation(cleanedChroma, shiftedShaathMin);
-        const tMaj = pearsonCorrelation(cleanedChroma, shiftedTempMaj);
-        const tMin = pearsonCorrelation(cleanedChroma, shiftedTempMin);
+        const sMaj = 0.50 * pearsonCorrelation(chromaTotal, shiftedKMaj) + 0.50 * pearsonCorrelation(chromaTotal, shiftedTMaj);
+        const sMin = 0.50 * pearsonCorrelation(chromaTotal, shiftedKMin) + 0.50 * pearsonCorrelation(chromaTotal, shiftedTMin);
         
-        const majScore = 0.70 * sMaj + 0.30 * tMaj;
-        const minScore = 0.70 * sMin + 0.30 * tMin;
-        
-        candidates.push({ root: shift, isMajor: true, keyText: `${noteNames[shift]} Major`, score: majScore });
-        candidates.push({ root: shift, isMajor: false, keyText: `${noteNames[shift]} Minor`, score: minScore });
+        candidates.push({ root: shift, isMajor: true, keyText: `${noteNames[shift]} Major`, score: sMaj });
+        candidates.push({ root: shift, isMajor: false, keyText: `${noteNames[shift]} Minor`, score: sMin });
     }
     
     candidates.sort((a, b) => b.score - a.score);
@@ -282,17 +276,19 @@ function detectPrecisionKey(channelData, sampleRate) {
     let second = candidates[1];
     
     // Relative Major vs Relative Minor Bass Disambiguation (e.g. 8A [A Minor] vs 8B [C Major])
-    if (second && (best.score - second.score < 0.06)) {
+    // The relative major is always 3 semitones above the relative minor: (maj.root - min.root + 12) % 12 === 3
+    if (second && (best.score - second.score < 0.15)) {
         let majC = best.isMajor ? best : (second.isMajor ? second : null);
         let minC = !best.isMajor ? best : (!second.isMajor ? second : null);
         
-        if (majC && minC && ((minC.root + 3) % 12 === majC.root)) {
+        if (majC && minC && ((majC.root - minC.root + 12) % 12 === 3)) {
             const minBass = chromaBass[minC.root] || 0;
             const majBass = chromaBass[majC.root] || 0;
             
-            if (minBass >= majBass * 0.80) {
+            // Electronic music overwhelmingly favors Minor when tonic bass is present
+            if (minBass > majBass * 1.05) {
                 best = minC;
-            } else {
+            } else if (majBass > minBass * 1.15) {
                 best = majC;
             }
         }
